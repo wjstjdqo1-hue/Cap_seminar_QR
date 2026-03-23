@@ -4,741 +4,832 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>QR 참석 확인 시스템</title>
-<script>
-// QRCode 라이브러리 동적 로드 (CDN 폴백 포함)
-function loadQRLib(callback) {
-  if (window.QRCode) { callback(); return; }
-  const urls = [
-    'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js',
-    'https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js'
-  ];
-  let idx = 0;
-  function tryLoad() {
-    if (idx >= urls.length) { console.error('QRCode 라이브러리 로드 실패'); return; }
-    const s = document.createElement('script');
-    s.src = urls[idx++];
-    s.onload = callback;
-    s.onerror = tryLoad;
-    document.head.appendChild(s);
+<script type="module">
+  import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
+  import { getDatabase, ref, onValue, push, remove, set, get } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js';
+
+  // ════════════════════════════════
+  //  ★ Firebase 설정 (여기만 수정)
+  // ════════════════════════════════
+  const FIREBASE_CONFIG = {
+    apiKey:            "YOUR_API_KEY",
+    authDomain:        "YOUR_PROJECT.firebaseapp.com",
+    databaseURL:       "https://YOUR_PROJECT-default-rtdb.firebaseio.com",
+    projectId:         "YOUR_PROJECT",
+    storageBucket:     "YOUR_PROJECT.appspot.com",
+    messagingSenderId: "YOUR_SENDER_ID",
+    appId:             "YOUR_APP_ID"
+  };
+  // ════════════════════════════════
+
+  let db = null;
+  let checkins = {};       // Firebase 데이터 (key→{name,org,time,walkIn})
+  let preRegistered = [];  // 사전 등록 명단
+  let directEntries = [];  // 직접 입력 임시 목록
+  let isCheckinMode = false;
+
+  // ── Firebase 초기화 ──
+  function initFirebase() {
+    try {
+      if (FIREBASE_CONFIG.apiKey === 'YOUR_API_KEY') return false;
+      const app = initializeApp(FIREBASE_CONFIG);
+      db = getDatabase(app);
+      return true;
+    } catch(e) {
+      console.error('Firebase 초기화 실패:', e);
+      return false;
+    }
   }
-  tryLoad();
-}
+
+  // ── 체크인 실시간 구독 ──
+  function subscribeCheckins(eventName) {
+    if (!db || !eventName) return;
+    const r = ref(db, `events/${encodeKey(eventName)}/checkins`);
+    onValue(r, snap => {
+      checkins = snap.val() || {};
+      refreshDashboard();
+      updateCheckinCount();
+    });
+  }
+
+  // ── 사전 명단 실시간 구독 ──
+  function subscribePreRegistered(eventName) {
+    if (!db || !eventName) return;
+    const r = ref(db, `events/${encodeKey(eventName)}/preRegistered`);
+    onValue(r, snap => {
+      preRegistered = snap.val() ? Object.values(snap.val()) : [];
+      showPreview();
+      refreshDashboard();
+    });
+  }
+
+  // ── 사전 명단 저장 ──
+  async function savePreRegistered(eventName, list) {
+    if (!db || !eventName) return;
+    const obj = {};
+    list.forEach((e, i) => { obj[`p${i}`] = e; });
+    await set(ref(db, `events/${encodeKey(eventName)}/preRegistered`), obj);
+  }
+
+  // ── 체크인 추가 ──
+  async function addCheckin(eventName, record) {
+    if (!db) return;
+    await push(ref(db, `events/${encodeKey(eventName)}/checkins`), record);
+  }
+
+  // ── 체크인 삭제 ──
+  async function removeCheckin(eventName, key) {
+    if (!db) return;
+    await remove(ref(db, `events/${encodeKey(eventName)}/checkins/${key}`));
+  }
+
+  // ── 중복 체크 (Firebase에서 현재 체크인 목록 확인) ──
+  async function isAlreadyCheckedIn(eventName, name) {
+    if (!db) return false;
+    const snap = await get(ref(db, `events/${encodeKey(eventName)}/checkins`));
+    const data = snap.val() || {};
+    return Object.values(data).some(c => c.name === name);
+  }
+
+  function encodeKey(str) {
+    return str.replace(/[.#$[\]/]/g, '_');
+  }
+
+  // ════════════════════════════════
+  //  DOM 준비 후 실행
+  // ════════════════════════════════
+  window.addEventListener('DOMContentLoaded', () => {
+    const firebaseOk = initFirebase();
+
+    // Firebase 설정 안내 배너
+    const banner = document.getElementById('firebaseBanner');
+    if (!firebaseOk) {
+      banner.style.display = 'flex';
+    }
+
+    // URL 파라미터 확인 → 참석자 모드
+    const params = new URLSearchParams(location.search);
+    if (params.get('checkin') === '1') {
+      isCheckinMode = true;
+      const eventName = params.get('event') || '';
+      document.getElementById('adminView').style.display = 'none';
+      document.getElementById('checkinView').style.display = 'flex';
+      if (eventName) {
+        document.getElementById('checkinEventTitle').textContent = eventName;
+        document.getElementById('checkinEventSub').textContent = eventName;
+      }
+      document.getElementById('ci_name').focus();
+      return;
+    }
+
+    // 운영자 모드 → localStorage 복원
+    loadLocalState();
+  });
+
+  // ════════════════════════════════
+  //  운영자 - 로컬 상태 관리
+  // ════════════════════════════════
+  const LS_KEY = 'qrcheckin_admin';
+
+  function loadLocalState() {
+    try {
+      const s = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
+      if (s.eventName) {
+        document.getElementById('eventNameInput').value = s.eventName;
+        document.getElementById('qrEventInput').value = s.eventName;
+        updateEventNameDisplay(s.eventName);
+      }
+      if (s.directEntries) {
+        directEntries = s.directEntries;
+        preRegistered = directEntries.map((e,i) => ({id:`pre_${i}`, name:e.name, org:e.org}));
+        renderDirectList();
+        showPreview();
+      }
+      const ev = document.getElementById('eventNameInput').value.trim();
+      if (ev && db) {
+        subscribeCheckins(ev);
+        subscribePreRegistered(ev);
+      }
+    } catch(e) {}
+  }
+
+  function saveLocalState() {
+    try {
+      localStorage.setItem(LS_KEY, JSON.stringify({
+        eventName: document.getElementById('eventNameInput').value.trim(),
+        directEntries
+      }));
+    } catch(e) {}
+  }
+
+  // ── 이벤트 이름 ──
+  function updateEventNameDisplay(v) {
+    document.getElementById('eventNameDisplay').textContent = v || '이벤트를 설정해주세요';
+  }
+
+  window.updateEventName = function() {
+    const v = document.getElementById('eventNameInput').value.trim();
+    updateEventNameDisplay(v);
+    saveLocalState();
+    if (v && db) { subscribeCheckins(v); subscribePreRegistered(v); }
+  };
+
+  window.syncEventName = function(v) {
+    document.getElementById('eventNameInput').value = v;
+    updateEventNameDisplay(v);
+    saveLocalState();
+  };
+
+  window.generateQR = function() {
+    const v = document.getElementById('qrEventInput').value.trim();
+    if (!v) { showToast('이벤트 이름을 입력해주세요', 'error'); return; }
+    window.syncEventName(v);
+    renderQR();
+  };
+
+  // ── 탭 전환 ──
+  window.switchTab = function(name) {
+    ['setup','qr','dashboard'].forEach((n,i) => {
+      document.querySelectorAll('.tab')[i].classList.toggle('active', n === name);
+      document.getElementById('panel-' + n).classList.toggle('active', n === name);
+    });
+    if (name === 'qr') {
+      const ev = document.getElementById('eventNameInput').value.trim();
+      document.getElementById('qrEventInput').value = ev;
+      renderQR();
+    }
+    if (name === 'dashboard') refreshDashboard();
+  };
+
+  window.switchSubtab = function(name) {
+    ['direct','csv'].forEach(n => {
+      document.getElementById('subtab-' + n).classList.toggle('active', n === name);
+      document.getElementById('subpanel-' + n).style.display = n === name ? '' : 'none';
+    });
+  };
+
+  // ── 직접 입력 ──
+  window.addDirectEntry = function() {
+    const nameEl = document.getElementById('directName');
+    const orgEl  = document.getElementById('directOrg');
+    const name = nameEl.value.trim(), org = orgEl.value.trim();
+    if (!name) { nameEl.focus(); showToast('이름을 입력해주세요', 'error'); return; }
+    directEntries.push({ name, org });
+    nameEl.value = ''; orgEl.value = ''; nameEl.focus();
+    commitPreRegistered();
+  };
+
+  window.removeDirectEntry = function(idx) {
+    directEntries.splice(idx, 1);
+    commitPreRegistered();
+  };
+
+  function renderDirectList() {
+    document.getElementById('directList').innerHTML = directEntries.map((e,i) => `
+      <div class="entry-row">
+        <span class="en">${e.name}</span>
+        <span class="eo">${e.org || '소속 없음'}</span>
+        <button class="entry-del" onclick="removeDirectEntry(${i})">✕</button>
+      </div>`).join('');
+  }
+
+  window.applyBulkInput = function() {
+    const raw = document.getElementById('bulkInput').value.trim();
+    if (!raw) return;
+    let added = 0;
+    raw.split('\n').filter(l => l.trim()).forEach(line => {
+      const p = line.split(',');
+      const name = p[0]?.trim(), org = p[1]?.trim() || '';
+      if (name) { directEntries.push({ name, org }); added++; }
+    });
+    document.getElementById('bulkInput').value = '';
+    commitPreRegistered();
+    showToast(`✅ ${added}명이 추가되었습니다`, 'success');
+  };
+
+  function commitPreRegistered() {
+    preRegistered = directEntries.map((e,i) => ({id:`pre_${i}`, name:e.name, org:e.org}));
+    renderDirectList();
+    showPreview();
+    refreshDashboard();
+    saveLocalState();
+    const ev = document.getElementById('eventNameInput').value.trim();
+    if (ev && db) savePreRegistered(ev, preRegistered);
+  }
+
+  window.loadSample = function() {
+    directEntries = [
+      {name:'김민준',org:'개발팀'},{name:'이서연',org:'디자인팀'},
+      {name:'박지훈',org:'기획팀'},{name:'최유진',org:'마케팅팀'},
+      {name:'정도윤',org:'개발팀'},{name:'강예은',org:'인사팀'},
+    ];
+    commitPreRegistered();
+  };
+
+  window.resetAll = function() {
+    if ((preRegistered.length || Object.keys(checkins).length) && !confirm('모든 데이터를 초기화하시겠습니까?')) return;
+    directEntries = []; preRegistered = []; checkins = {};
+    renderDirectList();
+    document.getElementById('previewCard').style.display = 'none';
+    refreshDashboard();
+    try { localStorage.removeItem(LS_KEY); } catch(e) {}
+    showToast('초기화되었습니다', 'success');
+  };
+
+  // ── CSV ──
+  window.loadCSV = function(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const r = new FileReader();
+    r.onload = e => parseCSV(e.target.result);
+    r.readAsText(file, 'UTF-8');
+  };
+
+  function parseCSV(text) {
+    const lines = text.trim().split('\n').filter(l => l.trim());
+    if (lines.length < 2) { showToast('CSV 데이터가 없습니다', 'error'); return; }
+    directEntries = lines.slice(1).map(l => {
+      const c = l.split(',').map(s => s.trim().replace(/^"|"$/g,''));
+      return { name: c[0]||'', org: c[1]||'' };
+    }).filter(e => e.name);
+    commitPreRegistered();
+    showToast(`✅ ${directEntries.length}명 로드 완료`, 'success');
+  }
+
+  function showPreview() {
+    const card = document.getElementById('previewCard');
+    if (!preRegistered.length) { card.style.display = 'none'; return; }
+    card.style.display = 'block';
+    document.getElementById('previewCount').textContent = `(총 ${preRegistered.length}명)`;
+    document.getElementById('previewTable').innerHTML = `
+      <table>
+        <thead><tr><th>이름</th><th>소속</th></tr></thead>
+        <tbody>${preRegistered.slice(0,8).map(p =>
+          `<tr><td style="font-weight:700">${p.name}</td><td>${p.org||'-'}</td></tr>`).join('')}
+        </tbody>
+      </table>
+      ${preRegistered.length > 8 ? `<div style="text-align:center;padding:10px;color:var(--muted);font-size:0.8rem">...외 ${preRegistered.length-8}명</div>` : ''}`;
+  }
+
+  // ── QR 생성 ──
+  window.renderQR = function() {
+    const eventName = document.getElementById('eventNameInput').value.trim();
+    document.getElementById('qrNotReady').style.display = eventName ? 'none' : '';
+    document.getElementById('qrReady').style.display   = eventName ? 'flex'  : 'none';
+    if (!eventName) return;
+    const url = location.href.split('?')[0] + '?checkin=1&event=' + encodeURIComponent(eventName);
+    document.getElementById('qrUrlBox').textContent    = url;
+    document.getElementById('qrEventLabel').textContent = eventName;
+    loadQRLib(() => {
+      const canvas = document.getElementById('qrCanvas');
+      canvas.innerHTML = '';
+      try {
+        new window.QRCode(canvas, { text: url, width: 220, height: 220, colorDark:'#000', colorLight:'#fff', correctLevel: window.QRCode.CorrectLevel.H });
+      } catch(e) {
+        canvas.innerHTML = `<div style="color:#ff6b6b;font-size:0.82rem;padding:10px;">QR 생성 오류: ${e.message}</div>`;
+      }
+    });
+  };
+
+  window.printQR = function() { window.print(); };
+
+  // ── Dashboard ──
+  function updateCheckinCount() {
+    const count = Object.keys(checkins).length;
+    const el = document.getElementById('liveCheckinCount');
+    if (el) el.textContent = count;
+  }
+
+  function refreshDashboard() {
+    const checkinList = Object.entries(checkins); // [[key, {name,org,time,walkIn}]]
+    const total  = preRegistered.length;
+    const walkIn = checkinList.filter(([,c]) => c.walkIn).length;
+    const done   = checkinList.filter(([,c]) => !c.walkIn).length;
+    const rate   = total ? Math.round(done / total * 100) : 0;
+
+    document.getElementById('statTotal').textContent  = total;
+    document.getElementById('statDone').textContent   = done;
+    document.getElementById('statWalkIn').textContent = walkIn;
+    document.getElementById('statRate').textContent   = rate + '%';
+    document.getElementById('progressFill').style.width = (total ? done/total*100 : 0) + '%';
+    document.getElementById('progressText').textContent = `사전 등록자 ${done}/${total}명 체크인 · 현장 등록 ${walkIn}명`;
+
+    const q = document.getElementById('dashSearch')?.value || '';
+    renderTable(buildRows(q));
+  }
+
+  function buildRows(query) {
+    const checkinList = Object.entries(checkins);
+    const rows = [];
+    preRegistered.forEach(p => {
+      const found = checkinList.find(([,c]) => c.name === p.name);
+      rows.push({ name:p.name, org:p.org, checkedIn:!!found, time:found?.[1]?.time||'', walkIn:false, checkinKey:found?.[0]||null });
+    });
+    checkinList.filter(([,c]) => c.walkIn).forEach(([key,c]) => {
+      rows.push({ name:c.name, org:c.org, checkedIn:true, time:c.time, walkIn:true, checkinKey:key });
+    });
+    if (query) return rows.filter(r => r.name.includes(query) || r.org.includes(query));
+    return rows;
+  }
+
+  window.deleteCheckin = async function(key, name) {
+    if (!confirm(`'${name}'님의 체크인 기록을 삭제하시겠습니까?`)) return;
+    const ev = document.getElementById('eventNameInput').value.trim();
+    if (db && ev) {
+      await removeCheckin(ev, key);
+    } else {
+      delete checkins[key];
+      refreshDashboard();
+    }
+    showToast(`🗑️ ${name}님 체크인 기록이 삭제되었습니다`, 'success');
+  };
+
+  function renderTable(rows) {
+    const wrap = document.getElementById('dashTable');
+    if (!rows.length) {
+      wrap.innerHTML = '<div class="empty-state"><div class="empty-icon">📊</div><p>아직 체크인 데이터가 없습니다</p></div>';
+      return;
+    }
+    wrap.innerHTML = `<table>
+      <thead><tr><th>이름</th><th>소속</th><th>구분</th><th>상태</th><th>체크인 일시</th><th>삭제</th></tr></thead>
+      <tbody>${rows.map(r => `
+        <tr>
+          <td style="font-weight:700">${r.name}</td>
+          <td>${r.org||'-'}</td>
+          <td>${r.walkIn ? '<span class="badge badge-walkin">현장</span>' : '<span style="font-size:0.76rem;color:var(--muted)">사전</span>'}</td>
+          <td><span class="badge ${r.checkedIn?'badge-done':'badge-wait'}">${r.checkedIn?'✅ 완료':'⏳ 대기'}</span></td>
+          <td style="font-family:'IBM Plex Mono',monospace;font-size:0.78rem;color:${r.checkedIn?'var(--accent)':'var(--muted)'}">${r.time||'-'}</td>
+          <td>${r.checkinKey ? `<button onclick="deleteCheckin('${r.checkinKey}','${r.name}')" class="del-btn">삭제</button>` : '-'}</td>
+        </tr>`).join('')}
+      </tbody>
+    </table>`;
+  }
+
+  window.filterTable = function(q) { renderTable(buildRows(q||'')); };
+
+  window.downloadCSV = function() {
+    const rows = buildRows('');
+    if (!rows.length) { showToast('다운로드할 데이터가 없습니다', 'error'); return; }
+    const data = [['이름','소속','구분','체크인여부','체크인일시'],
+      ...rows.map(r => [r.name, r.org, r.walkIn?'현장등록':'사전등록', r.checkedIn?'완료':'미완료', r.time||''])];
+    const csv = '\uFEFF' + data.map(r => r.join(',')).join('\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([csv], {type:'text/csv;charset=utf-8;'}));
+    a.download = `참석결과_${new Date().toLocaleDateString('ko-KR').replace(/\. /g,'-').replace('.','')}.csv`;
+    a.click();
+    showToast('📥 CSV 다운로드 완료', 'success');
+  };
+
+  // ════════════════════════════════
+  //  참석자 체크인 화면
+  // ════════════════════════════════
+  window.submitCheckin = async function() {
+    const name = document.getElementById('ci_name').value.trim();
+    const org  = document.getElementById('ci_org').value.trim();
+    const errEl = document.getElementById('ci_error');
+
+    if (!name) { errEl.textContent = '이름을 입력해주세요.'; errEl.style.display = ''; document.getElementById('ci_name').focus(); return; }
+
+    const params = new URLSearchParams(location.search);
+    const eventName = params.get('event') || '';
+
+    // 중복 체크
+    const btnEl = document.getElementById('ci_submit');
+    btnEl.disabled = true;
+    btnEl.textContent = '확인 중...';
+
+    const alreadyChecked = await isAlreadyCheckedIn(eventName, name);
+    if (alreadyChecked) {
+      errEl.textContent = `'${name}'님은 이미 참석 처리되었습니다.`;
+      errEl.style.display = '';
+      btnEl.disabled = false;
+      btnEl.textContent = '참석 확인 ✓';
+      return;
+    }
+
+    errEl.style.display = 'none';
+    const now = new Date();
+    const time = now.toLocaleDateString('ko-KR',{month:'2-digit',day:'2-digit'}).replace('. ','/').replace('.','')
+               + ' ' + now.toLocaleTimeString('ko-KR',{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+
+    // 사전 등록 여부 확인 (Firebase에서)
+    let walkIn = true;
+    if (db && eventName) {
+      const snap = await get(ref(db, `events/${encodeKey(eventName)}/preRegistered`));
+      const pre = snap.val() ? Object.values(snap.val()) : [];
+      walkIn = !pre.some(p => p.name === name);
+      const matchPre = pre.find(p => p.name === name);
+      const finalOrg = org || matchPre?.org || '';
+      await addCheckin(eventName, { name, org: finalOrg, time, walkIn });
+    }
+
+    // 성공 화면
+    document.getElementById('ci_form').style.display = 'none';
+    document.getElementById('ci_success').style.display = 'block';
+    document.getElementById('ci_success_name').textContent = name;
+    document.getElementById('ci_success_org').textContent = org || '소속 없음';
+    document.getElementById('ci_success_time').textContent = `참석 시각: ${time} · ${walkIn ? '현장 등록' : '사전 등록'}`;
+
+    // 3초 후 탭 닫기
+    let count = 3;
+    const countEl = document.getElementById('ci_countdown');
+    countEl.textContent = `${count}초 후 자동으로 닫힙니다...`;
+    const timer = setInterval(() => {
+      count--;
+      if (count > 0) {
+        countEl.textContent = `${count}초 후 자동으로 닫힙니다...`;
+      } else {
+        clearInterval(timer);
+        window.close();
+        if (!window.closed) window.history.back();
+      }
+    }, 1000);
+  };
+
+  window.closeCheckinNow = function() {
+    window.close();
+    if (!window.closed) window.history.back();
+  };
+
+  // ── Toast ──
+  window.showToast = function(msg, type) {
+    const t = document.getElementById('toast');
+    t.textContent = msg; t.className = 'show ' + (type||'success');
+    clearTimeout(t._timer);
+    t._timer = setTimeout(() => t.className = '', 2800);
+  };
+
+  // ── QR 라이브러리 로드 ──
+  window.loadQRLib = function(cb) {
+    if (window.QRCode) { cb(); return; }
+    const urls = [
+      'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js',
+      'https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js'
+    ];
+    let i = 0;
+    function tryLoad() {
+      if (i >= urls.length) return;
+      const s = document.createElement('script');
+      s.src = urls[i++]; s.onload = cb; s.onerror = tryLoad;
+      document.head.appendChild(s);
+    }
+    tryLoad();
+  };
+
+  // ── Drag & Drop CSV ──
+  window.addEventListener('DOMContentLoaded', () => {
+    const uz = document.getElementById('uploadZone');
+    if (!uz) return;
+    uz.addEventListener('dragover', e => { e.preventDefault(); uz.style.borderColor='var(--accent)'; });
+    uz.addEventListener('dragleave', () => uz.style.borderColor='var(--border)');
+    uz.addEventListener('drop', e => {
+      e.preventDefault(); uz.style.borderColor='var(--border)';
+      const file = e.dataTransfer.files[0];
+      if (file?.name.endsWith('.csv')) { const r=new FileReader(); r.onload=ev=>parseCSV(ev.target.result); r.readAsText(file,'UTF-8'); }
+    });
+  });
 </script>
+
 <link href="https://fonts.googleapis.com/css2?family=Gmarket+Sans:wght@300;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>
   :root {
-    --bg: #0a0a0f;
-    --surface: #13131a;
-    --surface2: #1c1c28;
-    --border: #2a2a3d;
-    --accent: #00e5a0;
-    --accent2: #7c5cfc;
-    --warn: #ff6b6b;
-    --text: #e8e8f0;
-    --muted: #6b6b88;
+    --bg:#0a0a0f; --surface:#13131a; --surface2:#1c1c28; --border:#2a2a3d;
+    --accent:#00e5a0; --accent2:#7c5cfc; --warn:#ff6b6b; --text:#e8e8f0; --muted:#6b6b88;
   }
-  * { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    font-family: 'Gmarket Sans', sans-serif;
-    background: var(--bg); color: var(--text); min-height: 100vh;
-  }
-  body::before {
-    content: ''; position: fixed; inset: 0;
-    background-image: linear-gradient(var(--border) 1px, transparent 1px), linear-gradient(90deg, var(--border) 1px, transparent 1px);
-    background-size: 40px 40px; opacity: 0.25; pointer-events: none; z-index: 0;
-  }
-  .wrap { position: relative; z-index: 1; max-width: 1100px; margin: 0 auto; padding: 24px; }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{font-family:'Gmarket Sans',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;}
+  body::before{content:'';position:fixed;inset:0;background-image:linear-gradient(var(--border) 1px,transparent 1px),linear-gradient(90deg,var(--border) 1px,transparent 1px);background-size:40px 40px;opacity:.22;pointer-events:none;z-index:0;}
 
-  /* Header */
-  .header {
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 18px 26px; background: var(--surface); border: 1px solid var(--border);
-    border-radius: 14px; margin-bottom: 22px;
-  }
-  .logo { font-size: 1.3rem; font-weight: 700; }
-  .logo span { color: var(--accent); }
-  .event-label { font-family: 'IBM Plex Mono', monospace; font-size: 0.78rem; color: var(--muted); text-align: right; }
-  #eventNameDisplay { color: var(--accent); font-size: 0.88rem; }
+  /* ── 운영자 화면 ── */
+  .wrap{position:relative;z-index:1;max-width:1100px;margin:0 auto;padding:20px 24px;}
+  .header{display:flex;align-items:center;justify-content:space-between;padding:16px 24px;background:var(--surface);border:1px solid var(--border);border-radius:14px;margin-bottom:20px;}
+  .logo{font-size:1.25rem;font-weight:700;} .logo span{color:var(--accent);}
+  .event-label{font-family:'IBM Plex Mono',monospace;font-size:.76rem;color:var(--muted);text-align:right;}
+  #eventNameDisplay{color:var(--accent);font-size:.88rem;}
 
-  /* Tabs */
-  .tabs { display: flex; gap: 8px; margin-bottom: 22px; }
-  .tab {
-    padding: 10px 20px; border-radius: 10px; border: 1px solid var(--border);
-    background: var(--surface); color: var(--muted);
-    font-family: 'Gmarket Sans', sans-serif; font-size: 0.85rem; font-weight: 500; cursor: pointer; transition: all 0.2s;
-  }
-  .tab:hover { border-color: var(--accent2); color: var(--text); }
-  .tab.active { background: var(--accent); border-color: var(--accent); color: #000; font-weight: 700; }
-  .panel { display: none; }
-  .panel.active { display: block; }
+  .tabs{display:flex;gap:8px;margin-bottom:20px;}
+  .tab{padding:9px 20px;border-radius:10px;border:1px solid var(--border);background:var(--surface);color:var(--muted);font-family:inherit;font-size:.85rem;font-weight:500;cursor:pointer;transition:all .18s;}
+  .tab.active{background:var(--accent);border-color:var(--accent);color:#000;font-weight:700;}
+  .panel{display:none;} .panel.active{display:block;}
 
-  /* Cards */
-  .card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 26px; margin-bottom: 18px; }
-  .card-title { font-size: 0.95rem; font-weight: 700; color: var(--accent); margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
-  .card-title::before { content: ''; display: block; width: 4px; height: 16px; background: var(--accent); border-radius: 2px; }
+  .card{background:var(--surface);border:1px solid var(--border);border-radius:14px;padding:24px;margin-bottom:16px;}
+  .card-title{font-size:.92rem;font-weight:700;color:var(--accent);margin-bottom:14px;display:flex;align-items:center;gap:8px;}
+  .card-title::before{content:'';display:block;width:4px;height:15px;background:var(--accent);border-radius:2px;}
 
-  /* Form */
-  input[type=text], textarea {
-    background: var(--surface2); border: 1px solid var(--border); border-radius: 10px;
-    padding: 11px 15px; color: var(--text); font-family: 'Gmarket Sans', sans-serif;
-    font-size: 0.9rem; width: 100%; outline: none; transition: border-color 0.2s;
-  }
-  input[type=text]:focus, textarea:focus { border-color: var(--accent); }
-  textarea { resize: vertical; height: 88px; }
-  label { font-size: 0.82rem; color: var(--muted); display: block; margin-bottom: 6px; }
-  .btn { padding: 11px 22px; border-radius: 10px; border: none; font-family: 'Gmarket Sans', sans-serif; font-size: 0.88rem; font-weight: 700; cursor: pointer; transition: all 0.2s; }
-  .btn-primary { background: var(--accent); color: #000; }
-  .btn-primary:hover { background: #00ffb3; transform: translateY(-1px); }
-  .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
-  .btn-secondary:hover { border-color: var(--accent2); }
-  .flex-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-  .mt-12 { margin-top: 12px; }
+  input[type=text],textarea{background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:10px 14px;color:var(--text);font-family:inherit;font-size:.9rem;width:100%;outline:none;transition:border-color .2s;}
+  input[type=text]:focus,textarea:focus{border-color:var(--accent);}
+  textarea{resize:vertical;min-height:80px;}
+  label{font-size:.8rem;color:var(--muted);display:block;margin-bottom:5px;}
+  .btn{padding:10px 20px;border-radius:10px;border:none;font-family:inherit;font-size:.88rem;font-weight:700;cursor:pointer;transition:all .18s;white-space:nowrap;}
+  .btn-p{background:var(--accent);color:#000;} .btn-p:hover{background:#00ffb3;}
+  .btn-s{background:var(--surface2);color:var(--text);border:1px solid var(--border);} .btn-s:hover{border-color:var(--accent2);}
+  .flex-row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;} .mt-12{margin-top:12px;}
 
-  /* Subtabs */
-  .subtab { padding: 8px 16px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface2); color: var(--muted); font-family: 'Gmarket Sans', sans-serif; font-size: 0.82rem; font-weight: 500; cursor: pointer; transition: all 0.2s; }
-  .subtab.active { border-color: var(--accent); color: var(--accent); font-weight: 700; }
+  .subtab{padding:7px 15px;border-radius:8px;border:1px solid var(--border);background:var(--surface2);color:var(--muted);font-family:inherit;font-size:.82rem;font-weight:500;cursor:pointer;}
+  .subtab.active{border-color:var(--accent);color:var(--accent);font-weight:700;}
 
-  /* Entry list */
-  .entry-row { display: flex; align-items: center; gap: 10px; padding: 9px 13px; background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; font-size: 0.88rem; animation: slideIn 0.2s ease; }
-  .entry-row .en { font-weight: 700; min-width: 80px; }
-  .entry-row .eo { color: var(--muted); flex: 1; }
-  .entry-del { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 1rem; padding: 2px 6px; border-radius: 6px; transition: all 0.15s; }
-  .entry-del:hover { background: rgba(255,107,107,0.15); color: var(--warn); }
+  .entry-row{display:flex;align-items:center;gap:10px;padding:9px 12px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;font-size:.87rem;}
+  .en{font-weight:700;min-width:80px;} .eo{color:var(--muted);flex:1;}
+  .entry-del{background:none;border:none;color:var(--muted);cursor:pointer;font-size:.95rem;padding:2px 6px;border-radius:6px;}
+  .entry-del:hover{background:rgba(255,107,107,.15);color:var(--warn);}
 
-  /* QR Display */
-  .qr-display-wrap { display: flex; gap: 32px; align-items: flex-start; flex-wrap: wrap; }
-  .qr-box { flex: 0 0 auto; background: #fff; border-radius: 16px; padding: 20px; display: flex; flex-direction: column; align-items: center; gap: 10px; box-shadow: 0 0 40px rgba(0,229,160,0.18); }
-  .qr-event-name { font-family: 'Gmarket Sans', sans-serif; font-size: 0.9rem; font-weight: 700; color: #111; text-align: center; max-width: 220px; }
-  .qr-sub { font-size: 0.72rem; color: #888; }
-  .qr-info { flex: 1; min-width: 240px; }
-  .qr-url-box { background: var(--surface2); border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; margin-bottom: 14px; font-family: 'IBM Plex Mono', monospace; font-size: 0.76rem; color: var(--accent); word-break: break-all; line-height: 1.5; }
-  .qr-instruction { font-size: 0.85rem; color: var(--muted); line-height: 1.8; }
-  .qr-instruction b { color: var(--text); }
+  .qr-display-wrap{display:flex;gap:32px;align-items:flex-start;flex-wrap:wrap;}
+  .qr-box{flex:0 0 auto;background:#fff;border-radius:16px;padding:20px;display:flex;flex-direction:column;align-items:center;gap:10px;box-shadow:0 0 40px rgba(0,229,160,.18);}
 
-  /* Stats */
-  .stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 20px; }
-  .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px; text-align: center; }
-  .stat-num { font-family: 'IBM Plex Mono', monospace; font-size: 2rem; font-weight: 600; color: var(--accent); line-height: 1; margin-bottom: 5px; }
-  .stat-label { font-size: 0.76rem; color: var(--muted); }
-  .progress-bar { height: 7px; background: var(--surface2); border-radius: 99px; overflow: hidden; margin-bottom: 6px; }
-  .progress-fill { height: 100%; background: linear-gradient(90deg, var(--accent2), var(--accent)); border-radius: 99px; transition: width 0.5s ease; }
-  .progress-text { font-family: 'IBM Plex Mono', monospace; font-size: 0.73rem; color: var(--muted); text-align: right; }
+  .stats-row{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:16px;}
+  .stat-card{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:16px;text-align:center;}
+  .stat-num{font-family:'IBM Plex Mono',monospace;font-size:1.9rem;font-weight:700;line-height:1;margin-bottom:4px;}
+  .stat-label{font-size:.74rem;color:var(--muted);}
+  .progress-bar{height:7px;background:var(--surface2);border-radius:99px;overflow:hidden;margin-bottom:5px;}
+  .progress-fill{height:100%;background:linear-gradient(90deg,var(--accent2),var(--accent));border-radius:99px;transition:width .5s;}
+  .progress-text{font-family:'IBM Plex Mono',monospace;font-size:.72rem;color:var(--muted);text-align:right;}
 
-  /* Table */
-  .table-wrap { overflow-x: auto; }
-  table { width: 100%; border-collapse: collapse; }
-  th { background: var(--surface2); padding: 11px 14px; text-align: left; font-size: 0.76rem; color: var(--muted); font-weight: 500; letter-spacing: 0.05em; text-transform: uppercase; }
-  td { padding: 11px 14px; border-bottom: 1px solid var(--border); font-size: 0.88rem; }
-  tr:last-child td { border-bottom: none; }
-  tr:hover td { background: var(--surface2); }
-  .badge { display: inline-block; padding: 3px 9px; border-radius: 99px; font-size: 0.73rem; font-weight: 700; font-family: 'IBM Plex Mono', monospace; }
-  .badge-done { background: rgba(0,229,160,0.12); color: var(--accent); }
-  .badge-wait { background: rgba(107,107,136,0.2); color: var(--muted); }
-  .badge-walkin { background: rgba(124,92,252,0.18); color: #a78bfa; }
-  .search-row { display: flex; gap: 10px; margin-bottom: 14px; align-items: center; }
-  .search-row input { flex: 1; }
+  .table-wrap{overflow-x:auto;}
+  table{width:100%;border-collapse:collapse;}
+  th{background:var(--surface2);padding:10px 14px;text-align:left;font-size:.74rem;color:var(--muted);font-weight:500;text-transform:uppercase;}
+  td{padding:10px 14px;border-bottom:1px solid var(--border);font-size:.87rem;}
+  tr:last-child td{border-bottom:none;} tr:hover td{background:var(--surface2);}
+  .badge{display:inline-block;padding:2px 8px;border-radius:99px;font-size:.72rem;font-weight:700;font-family:monospace;}
+  .badge-done{background:rgba(0,229,160,.12);color:var(--accent);}
+  .badge-wait{background:rgba(107,107,136,.18);color:var(--muted);}
+  .badge-walkin{background:rgba(124,92,252,.18);color:#a78bfa;}
+  .del-btn{background:none;border:1px solid #3a2a2a;border-radius:6px;color:var(--warn);cursor:pointer;padding:3px 9px;font-size:.75rem;transition:all .15s;}
+  .del-btn:hover{background:rgba(255,107,107,.12);}
+
+  .search-row{display:flex;gap:10px;margin-bottom:14px;align-items:center;}
+  .search-row input{flex:1;}
+  .upload-zone{border:2px dashed var(--border);border-radius:12px;padding:36px;text-align:center;cursor:pointer;transition:all .2s;}
+  .upload-zone:hover{border-color:var(--accent);}
+  .empty-state{text-align:center;padding:36px;color:var(--muted);}
+  .empty-icon{font-size:2.2rem;margin-bottom:10px;}
+
+  /* Firebase 설정 배너 */
+  #firebaseBanner{display:none;position:fixed;top:0;left:0;right:0;z-index:900;background:#1a1200;border-bottom:2px solid #f59e0b;padding:14px 24px;gap:16px;align-items:flex-start;}
+  .fb-banner-title{color:#f59e0b;font-weight:700;font-size:.9rem;margin-bottom:6px;}
+  .fb-banner-steps{color:#d4a;font-size:.8rem;line-height:1.8;color:#fde68a;}
+  code{background:#2a1f00;padding:1px 6px;border-radius:4px;font-family:'IBM Plex Mono',monospace;font-size:.82rem;color:#fbbf24;}
+  .fb-close{margin-left:auto;background:none;border:1px solid #f59e0b;color:#f59e0b;border-radius:8px;padding:6px 14px;cursor:pointer;font-size:.82rem;white-space:nowrap;align-self:flex-start;}
+
+  /* 실시간 표시 */
+  .live-badge{display:inline-flex;align-items:center;gap:6px;font-size:.76rem;color:var(--accent);font-family:'IBM Plex Mono',monospace;}
+  .live-dot{width:7px;height:7px;border-radius:50%;background:var(--accent);animation:pulse 1.4s infinite;}
+  @keyframes pulse{0%,100%{opacity:1;}50%{opacity:.3;}}
+
+  /* ── 참석자 체크인 화면 ── */
+  #checkinView{display:none;position:fixed;inset:0;z-index:100;background:var(--bg);align-items:center;justify-content:center;flex-direction:column;}
+  .ci-box{background:var(--surface);border:1px solid var(--border);border-radius:20px;padding:40px 36px;width:100%;max-width:420px;box-shadow:0 0 60px rgba(0,229,160,.1);}
+  .ci-title{font-size:1.6rem;font-weight:700;margin-bottom:6px;}
+  .ci-sub{font-size:.85rem;color:var(--muted);margin-bottom:26px;line-height:1.6;}
+  .ci-event{color:var(--accent);}
+  .ci-field{margin-bottom:16px;}
+  .ci-submit{width:100%;padding:15px;border-radius:12px;border:none;background:var(--accent);color:#000;font-family:inherit;font-size:1rem;font-weight:700;cursor:pointer;transition:all .2s;margin-top:6px;}
+  .ci-submit:hover{background:#00ffb3;} .ci-submit:disabled{opacity:.6;cursor:default;}
+  .ci-error{font-size:.82rem;color:var(--warn);padding:10px 12px;background:rgba(255,107,107,.08);border-radius:8px;margin-bottom:10px;display:none;}
+  #ci_success{display:none;text-align:center;padding:16px 0;}
+  .ci-check{font-size:4.5rem;margin-bottom:16px;}
+  .ci-sname{font-size:1.6rem;font-weight:700;color:var(--accent);margin-bottom:6px;}
+  .ci-sorg{color:var(--muted);font-size:.95rem;margin-bottom:10px;}
+  .ci-stime{font-family:'IBM Plex Mono',monospace;font-size:.78rem;color:var(--accent2);}
+  .ci-countdown{font-size:.76rem;color:var(--muted);margin-top:14px;}
+  .ci-closebtn{width:100%;padding:12px;border-radius:10px;border:1px solid var(--border);background:var(--surface2);color:var(--text);font-family:inherit;font-size:.9rem;font-weight:700;cursor:pointer;margin-top:12px;}
 
   /* Toast */
-  #toast { position: fixed; bottom: 28px; right: 28px; padding: 13px 20px; border-radius: 11px; font-size: 0.88rem; font-weight: 700; z-index: 999; opacity: 0; transform: translateY(8px); transition: all 0.3s; pointer-events: none; }
-  #toast.show { opacity: 1; transform: translateY(0); }
-  #toast.success { background: var(--accent); color: #000; }
-  #toast.error { background: var(--warn); color: #fff; }
+  #toast{position:fixed;bottom:26px;right:26px;padding:12px 20px;border-radius:11px;font-size:.87rem;font-weight:700;z-index:999;opacity:0;transform:translateY(8px);transition:all .3s;pointer-events:none;}
+  #toast.show{opacity:1;transform:translateY(0);}
+  #toast.success{background:var(--accent);color:#000;}
+  #toast.error{background:var(--warn);color:#fff;}
 
-  /* Modal */
-  #checkinModal { position: fixed; inset: 0; z-index: 500; background: rgba(0,0,0,0.78); backdrop-filter: blur(6px); display: flex; align-items: center; justify-content: center; opacity: 0; pointer-events: none; transition: opacity 0.3s; }
-  #checkinModal.open { opacity: 1; pointer-events: all; }
-  .modal-box { background: var(--surface); border: 1px solid var(--border); border-radius: 20px; padding: 36px; width: 100%; max-width: 420px; transform: translateY(20px); transition: transform 0.3s; box-shadow: 0 0 60px rgba(0,229,160,0.12); }
-  #checkinModal.open .modal-box { transform: translateY(0); }
-  .modal-title { font-size: 1.3rem; font-weight: 700; margin-bottom: 6px; }
-  .modal-sub { font-size: 0.85rem; color: var(--muted); margin-bottom: 24px; line-height: 1.6; }
-  .modal-field { margin-bottom: 16px; }
-  .modal-submit { width: 100%; padding: 14px; border-radius: 12px; border: none; background: var(--accent); color: #000; font-family: 'Gmarket Sans', sans-serif; font-size: 1rem; font-weight: 700; cursor: pointer; transition: all 0.2s; margin-top: 8px; }
-  .modal-submit:hover { background: #00ffb3; transform: translateY(-1px); }
-  .modal-close-btn { width: 100%; padding: 12px; border-radius: 10px; border: 1px solid var(--border); background: var(--surface2); color: var(--text); font-family: 'Gmarket Sans', sans-serif; font-size: 0.9rem; font-weight: 700; cursor: pointer; margin-top: 10px; transition: all 0.2s; }
-  .modal-close-btn:hover { border-color: var(--accent); }
-  .modal-success { text-align: center; padding: 16px 0; animation: popIn 0.3s ease; }
-  .big-check { font-size: 4rem; margin-bottom: 14px; }
-  .success-name { font-size: 1.6rem; font-weight: 700; color: var(--accent); }
-  .success-org { color: var(--muted); margin-top: 6px; font-size: 0.95rem; }
-  .success-time { font-family: 'IBM Plex Mono', monospace; font-size: 0.8rem; color: var(--accent2); margin-top: 10px; }
-
-  /* Upload zone */
-  .upload-zone { border: 2px dashed var(--border); border-radius: 12px; padding: 36px; text-align: center; cursor: pointer; transition: all 0.2s; }
-  .upload-zone:hover { border-color: var(--accent); background: rgba(0,229,160,0.03); }
-
-  .empty-state { text-align: center; padding: 36px; color: var(--muted); }
-  .empty-icon { font-size: 2.2rem; margin-bottom: 10px; }
-  ::-webkit-scrollbar { width: 5px; height: 5px; }
-  ::-webkit-scrollbar-track { background: var(--surface); }
-  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-  @keyframes slideIn { from { opacity:0; transform:translateX(-8px); } to { opacity:1; transform:translateX(0); } }
-  @keyframes popIn { from { opacity:0; transform:scale(0.92); } to { opacity:1; transform:scale(1); } }
+  ::-webkit-scrollbar{width:5px;height:5px;} ::-webkit-scrollbar-track{background:var(--surface);} ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px;}
+  @keyframes slideIn{from{opacity:0;transform:translateX(-8px);}to{opacity:1;transform:translateX(0);}}
 </style>
 </head>
 <body>
 
-<!-- ══ 체크인 모달 (참석자용) ══ -->
-<div id="checkinModal">
-  <div class="modal-box">
-    <div id="modalFormView">
-      <div class="modal-title">✋ 참석 등록</div>
-      <div class="modal-sub" id="modalEventSub">이름과 소속을 입력하여 참석을 확인해주세요.</div>
-      <div class="modal-field">
-        <label>이름 *</label>
-        <input type="text" id="modalName" placeholder="전성배" onkeydown="if(event.key==='Enter')document.getElementById('modalOrg').focus()">
-      </div>
-      <div class="modal-field">
-        <label>소속</label>
-        <input type="text" id="modalOrg" placeholder="예: NICE평가정보" onkeydown="if(event.key==='Enter')submitCheckin()">
-      </div>
-      <div id="modalError" style="font-size:0.82rem;color:var(--warn);margin-bottom:8px;display:none;padding:10px 12px;background:rgba(255,107,107,0.08);border-radius:8px;"></div>
-      <button class="modal-submit" onclick="submitCheckin()">참석 확인 ✓</button>
-      <button class="modal-close-btn" onclick="closeModal()">닫기</button>
+<!-- ══ Firebase 설정 안내 배너 ══ -->
+<div id="firebaseBanner">
+  <div style="flex:1">
+    <div class="fb-banner-title">⚠️ Firebase 설정이 필요합니다 — 실시간 동기화를 위해 아래 단계를 따라주세요</div>
+    <div class="fb-banner-steps">
+      1. <a href="https://console.firebase.google.com" target="_blank" style="color:#fbbf24">console.firebase.google.com</a> → 새 프로젝트 생성<br>
+      2. [빌드 → Realtime Database] → 데이터베이스 만들기 → <b>테스트 모드</b>로 시작<br>
+      3. [프로젝트 설정 → 일반 → 내 앱 → 웹 앱 추가] → SDK 설정에서 config 복사<br>
+      4. 이 HTML 파일 상단 <code>FIREBASE_CONFIG</code> 객체에 붙여넣기 후 저장
     </div>
-    <div id="modalSuccessView" style="display:none">
-      <div class="modal-success">
-        <div class="big-check">✅</div>
-        <div class="success-name" id="successName"></div>
-        <div class="success-org" id="successOrg"></div>
-        <div class="success-time" id="successTime"></div>
-        <div id="successCountdown" style="font-size:0.78rem;color:var(--muted);margin-top:14px;"></div>
-        <button class="modal-close-btn" style="margin-top:10px" onclick="closeModal()">바로 닫기</button>
+  </div>
+  <button class="fb-close" onclick="document.getElementById('firebaseBanner').style.display='none'">닫기</button>
+</div>
+
+<!-- ══ 참석자 체크인 화면 (QR 스캔 후) ══ -->
+<div id="checkinView">
+  <div class="ci-box">
+    <div id="ci_form">
+      <div class="ci-title">✋ 참석 등록</div>
+      <div class="ci-sub"><span class="ci-event" id="checkinEventSub"></span><br>이름과 소속을 입력하여 참석을 확인해주세요.</div>
+      <div class="ci-field">
+        <label>이름 *</label>
+        <input type="text" id="ci_name" placeholder="전성배" onkeydown="if(event.key==='Enter')document.getElementById('ci_org').focus()">
       </div>
+      <div class="ci-field">
+        <label>소속</label>
+        <input type="text" id="ci_org" placeholder="예: NICE평가정보" onkeydown="if(event.key==='Enter')submitCheckin()">
+      </div>
+      <div class="ci-error" id="ci_error"></div>
+      <button class="ci-submit" id="ci_submit" onclick="submitCheckin()">참석 확인 ✓</button>
+    </div>
+    <div id="ci_success">
+      <div class="ci-check">✅</div>
+      <div class="ci-sname" id="ci_success_name"></div>
+      <div class="ci-sorg" id="ci_success_org"></div>
+      <div class="ci-stime" id="ci_success_time"></div>
+      <div class="ci-countdown" id="ci_countdown"></div>
+      <button class="ci-closebtn" onclick="closeCheckinNow()">바로 닫기</button>
     </div>
   </div>
 </div>
 
-<div class="wrap">
-  <div class="header">
-    <div class="logo">QR <span>CHECK</span>IN</div>
-    <div class="event-label">
-      <div id="eventNameDisplay">이벤트를 설정해주세요</div>
-      <div>참석 확인 시스템 v2.0</div>
-    </div>
-  </div>
-
-  <div class="tabs">
-    <button class="tab active" onclick="switchTab('setup')">⚙️ 설정</button>
-    <button class="tab" onclick="switchTab('qr')">🔳 QR 코드</button>
-    <button class="tab" onclick="switchTab('dashboard')">📊 현황 대시보드</button>
-  </div>
-
-  <!-- ══ 설정 패널 ══ -->
-  <div id="panel-setup" class="panel active">
-    <div class="card">
-      <div class="card-title">이벤트 정보</div>
-      <label>이벤트 이름</label>
-      <input type="text" id="eventNameInput" placeholder="예: 2025 개발자 컨퍼런스" oninput="updateEventName()">
-    </div>
-
-    <div class="card">
-      <div class="card-title">사전 등록 명단 <span style="font-size:0.8rem;color:var(--muted);font-weight:400;">(선택)</span></div>
-      <div style="font-size:0.82rem;color:var(--muted);margin-bottom:16px;line-height:1.7;">
-        사전 신청자를 미리 등록해두면 체크인 시 사전/현장 참석 여부를 구분할 수 있어요.<br>
-        <span style="color:var(--accent)">등록하지 않아도 누구나 QR로 현장 참석 등록이 가능합니다.</span>
-      </div>
-      <div style="display:flex;gap:8px;margin-bottom:18px;">
-        <button class="subtab active" id="subtab-direct" onclick="switchSubtab('direct')">✏️ 직접 입력</button>
-        <button class="subtab" id="subtab-csv" onclick="switchSubtab('csv')">📂 CSV 업로드</button>
-      </div>
-
-      <div id="subpanel-direct">
-        <div style="display:flex;gap:10px;margin-bottom:10px;">
-          <input type="text" id="directName" placeholder="이름" style="flex:1" onkeydown="if(event.key==='Enter')document.getElementById('directOrg').focus()">
-          <input type="text" id="directOrg" placeholder="소속 (선택)" style="flex:1" onkeydown="if(event.key==='Enter')addDirectEntry()">
-          <button class="btn btn-primary" onclick="addDirectEntry()">추가</button>
-        </div>
-        <div id="directList" style="display:flex;flex-direction:column;gap:6px;max-height:240px;overflow-y:auto;margin-bottom:14px;"></div>
-        <div style="font-size:0.82rem;color:var(--muted);margin-bottom:8px;">여러 명 한번에 입력 (이름,소속 형식):</div>
-        <textarea id="bulkInput" placeholder="김민준,개발팀
-이서연,디자인팀
-박지훈,기획팀"></textarea>
-        <div class="flex-row mt-12">
-          <button class="btn btn-primary" onclick="applyBulkInput()">📋 일괄 추가</button>
-          <button class="btn btn-secondary" onclick="loadSample()">🧪 샘플 데이터</button>
-          <button class="btn btn-secondary" onclick="resetAll()">🗑️ 초기화</button>
-        </div>
-      </div>
-
-      <div id="subpanel-csv" style="display:none">
-        <div style="font-size:0.82rem;color:var(--muted);margin-bottom:12px;">
-          CSV 형식: <code style="background:var(--surface2);padding:2px 6px;border-radius:4px;color:var(--accent)">이름,소속</code> (첫 줄 헤더 포함)
-        </div>
-        <div class="upload-zone" id="uploadZone" onclick="document.getElementById('csvInput').click()">
-          <div style="font-size:2.2rem;margin-bottom:10px;">📂</div>
-          <p style="color:var(--muted);font-size:0.88rem;"><strong style="color:var(--accent)">클릭하여 CSV 선택</strong> 또는 드래그</p>
-        </div>
-        <input type="file" id="csvInput" accept=".csv" style="display:none" onchange="loadCSV(event)">
-        <div class="flex-row mt-12">
-          <button class="btn btn-secondary" onclick="loadSample()">🧪 샘플 데이터</button>
-          <button class="btn btn-secondary" onclick="resetAll()">🗑️ 초기화</button>
+<!-- ══ 운영자 화면 ══ -->
+<div id="adminView">
+  <div class="wrap">
+    <div class="header">
+      <div class="logo">QR <span>CHECK</span>IN</div>
+      <div style="display:flex;align-items:center;gap:16px;">
+        <div class="live-badge"><div class="live-dot"></div>실시간 동기화</div>
+        <div class="event-label">
+          <div id="eventNameDisplay">이벤트를 설정해주세요</div>
+          <div>참석 확인 시스템 v3.0</div>
         </div>
       </div>
     </div>
 
-    <div class="card" id="previewCard" style="display:none">
-      <div class="card-title">등록된 명단 <span id="previewCount" style="color:var(--muted);font-weight:400;font-size:0.83rem"></span></div>
-      <div id="previewTable"></div>
+    <div class="tabs">
+      <button class="tab active" onclick="switchTab('setup')">⚙️ 설정</button>
+      <button class="tab" onclick="switchTab('qr')">🔳 QR 코드</button>
+      <button class="tab" onclick="switchTab('dashboard')">📊 현황 대시보드</button>
     </div>
-  </div>
 
-  <!-- ══ QR 패널 ══ -->
-  <div id="panel-qr" class="panel">
-    <div class="card">
-      <div class="card-title">이벤트 체크인 QR 코드</div>
-
-      <div style="display:flex;gap:10px;align-items:center;margin-bottom:18px;">
-        <input type="text" id="qrEventInput" placeholder="이벤트 이름 입력 후 QR 생성..."
-          style="flex:1"
-          onkeydown="if(event.key==='Enter')generateQR()"
-          oninput="syncEventName(this.value)">
-        <button class="btn btn-primary" onclick="generateQR()">🔳 QR 생성</button>
+    <!-- 설정 -->
+    <div id="panel-setup" class="panel active">
+      <div class="card">
+        <div class="card-title">이벤트 정보</div>
+        <label>이벤트 이름</label>
+        <input type="text" id="eventNameInput" placeholder="예: 2025 개발자 컨퍼런스" oninput="updateEventName()">
       </div>
 
-      <div id="qrNotReady">
-        <div class="empty-state">
-          <div class="empty-icon">🔳</div>
-          <p>이벤트 이름을 입력하고 QR 생성 버튼을 눌러주세요</p>
+      <div class="card">
+        <div class="card-title">사전 등록 명단 <span style="font-size:.78rem;color:var(--muted);font-weight:400;">(선택)</span></div>
+        <div style="font-size:.82rem;color:var(--muted);margin-bottom:16px;line-height:1.7;">
+          사전 신청자를 등록하면 체크인 시 사전/현장 참석 여부를 구분할 수 있어요.<br>
+          <span style="color:var(--accent)">등록하지 않아도 누구나 QR로 현장 참석 등록이 가능합니다.</span>
         </div>
-      </div>
-      <div id="qrReady" class="qr-display-wrap" style="display:none">
-        <div class="qr-box">
-          <div id="qrCanvas"></div>
-          <div class="qr-event-name" id="qrEventLabel">-</div>
-          <div class="qr-sub">QR 스캔 후 이름/소속 입력</div>
+        <div style="display:flex;gap:8px;margin-bottom:18px;">
+          <button class="subtab active" id="subtab-direct" onclick="switchSubtab('direct')">✏️ 직접 입력</button>
+          <button class="subtab" id="subtab-csv" onclick="switchSubtab('csv')">📂 CSV 업로드</button>
         </div>
-        <div class="qr-info">
-          <div style="font-size:0.82rem;color:var(--muted);margin-bottom:8px;">체크인 링크</div>
-          <div class="qr-url-box" id="qrUrlBox">-</div>
-          <div class="qr-instruction">
-            <b>사용 방법</b><br>
-            1. 이 QR 코드를 출력하거나 화면에 띄워두세요<br>
-            2. 참석자가 스마트폰으로 QR 스캔<br>
-            3. 이름 &; 소속 입력 후 제출<br>
-            4. 즉시 참석 처리 완료 ✅<br><br>
-            <span style="color:var(--accent2)">※ 같은 이름으로 중복 제출 시 경고 안내됩니다</span>
+
+        <div id="subpanel-direct">
+          <div style="display:flex;gap:10px;margin-bottom:10px;">
+            <input type="text" id="directName" placeholder="이름" style="flex:1" onkeydown="if(event.key==='Enter')document.getElementById('directOrg').focus()">
+            <input type="text" id="directOrg" placeholder="소속 (선택)" style="flex:1" onkeydown="if(event.key==='Enter')addDirectEntry()">
+            <button class="btn btn-p" onclick="addDirectEntry()">추가</button>
           </div>
+          <div id="directList" style="display:flex;flex-direction:column;gap:6px;max-height:240px;overflow-y:auto;margin-bottom:14px;"></div>
+          <div style="font-size:.82rem;color:var(--muted);margin-bottom:8px;">여러 명 한번에 입력 (이름,소속):</div>
+          <textarea id="bulkInput" placeholder="김민준,개발팀
+이서연,디자인팀"></textarea>
           <div class="flex-row mt-12">
-            <button class="btn btn-primary" onclick="printQR()">🖨️ 인쇄</button>
-            <button class="btn btn-secondary" onclick="openCheckinModal()">👁️ 미리보기</button>
+            <button class="btn btn-p" onclick="applyBulkInput()">📋 일괄 추가</button>
+            <button class="btn btn-s" onclick="loadSample()">🧪 샘플 데이터</button>
+            <button class="btn btn-s" onclick="resetAll()">🗑️ 초기화</button>
+          </div>
+        </div>
+
+        <div id="subpanel-csv" style="display:none">
+          <div style="font-size:.82rem;color:var(--muted);margin-bottom:12px;">
+            CSV 형식: <code style="background:var(--surface2);padding:2px 6px;border-radius:4px;color:var(--accent)">이름,소속</code>
+          </div>
+          <div class="upload-zone" id="uploadZone" onclick="document.getElementById('csvInput').click()">
+            <div style="font-size:2rem;margin-bottom:8px;">📂</div>
+            <p style="color:var(--muted);font-size:.88rem;"><strong style="color:var(--accent)">클릭하여 CSV 선택</strong> 또는 드래그</p>
+          </div>
+          <input type="file" id="csvInput" accept=".csv" style="display:none" onchange="loadCSV(event)">
+          <div class="flex-row mt-12">
+            <button class="btn btn-s" onclick="loadSample()">🧪 샘플 데이터</button>
+            <button class="btn btn-s" onclick="resetAll()">🗑️ 초기화</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="card" id="previewCard" style="display:none">
+        <div class="card-title">등록된 명단 <span id="previewCount" style="color:var(--muted);font-weight:400;font-size:.82rem"></span></div>
+        <div id="previewTable"></div>
+      </div>
+    </div>
+
+    <!-- QR -->
+    <div id="panel-qr" class="panel">
+      <div class="card">
+        <div class="card-title">이벤트 체크인 QR 코드</div>
+        <div style="display:flex;gap:10px;align-items:center;margin-bottom:18px;">
+          <input type="text" id="qrEventInput" placeholder="이벤트 이름 입력 후 QR 생성..." style="flex:1"
+            onkeydown="if(event.key==='Enter')generateQR()" oninput="syncEventName(this.value)">
+          <button class="btn btn-p" onclick="generateQR()">🔳 QR 생성</button>
+        </div>
+        <div id="qrNotReady">
+          <div class="empty-state"><div class="empty-icon">🔳</div><p>이벤트 이름을 입력하고 QR 생성 버튼을 눌러주세요</p></div>
+        </div>
+        <div id="qrReady" class="qr-display-wrap" style="display:none">
+          <div class="qr-box">
+            <div id="qrCanvas"></div>
+            <div style="font-size:.88rem;font-weight:700;color:#111;text-align:center;max-width:220px" id="qrEventLabel"></div>
+            <div style="font-size:.7rem;color:#888">QR 스캔 후 이름/소속 입력</div>
+          </div>
+          <div style="flex:1;min-width:220px;">
+            <div style="font-size:.8rem;color:var(--muted);margin-bottom:8px;">체크인 링크</div>
+            <div style="background:var(--surface2);border:1px solid var(--border);border-radius:10px;padding:12px 16px;margin-bottom:14px;font-family:'IBM Plex Mono',monospace;font-size:.75rem;color:var(--accent);word-break:break-all;line-height:1.6" id="qrUrlBox"></div>
+            <div style="font-size:.85rem;color:#9090a8;line-height:1.9;">
+              <b style="color:var(--text)">사용 방법</b><br>
+              1. QR 코드를 출력하거나 화면에 띄워두세요<br>
+              2. 참석자가 스마트폰으로 QR 스캔<br>
+              3. 이름 &; 소속 입력 후 제출<br>
+              4. 컴퓨터 대시보드에 즉시 반영 ✅
+            </div>
+            <div style="margin-top:10px;padding:10px 14px;background:rgba(124,92,252,.1);border-radius:10px;font-size:.8rem;color:#a78bfa;">
+              ※ 휴대폰 체크인이 컴퓨터에 실시간으로 반영됩니다
+            </div>
+            <div class="flex-row mt-12">
+              <button class="btn btn-p" onclick="printQR()">🖨️ 인쇄</button>
+            </div>
           </div>
         </div>
       </div>
     </div>
-  </div>
 
-  <!-- ══ 대시보드 패널 ══ -->
-  <div id="panel-dashboard" class="panel">
-    <div class="stats-row">
-      <div class="stat-card">
-        <div class="stat-num" id="statTotal">0</div>
-        <div class="stat-label">사전 등록</div>
+    <!-- 대시보드 -->
+    <div id="panel-dashboard" class="panel">
+      <div class="stats-row">
+        <div class="stat-card"><div class="stat-num" id="statTotal" style="color:var(--accent)">0</div><div class="stat-label">사전 등록</div></div>
+        <div class="stat-card"><div class="stat-num" id="statDone"  style="color:var(--accent)">0</div><div class="stat-label">체크인 완료</div></div>
+        <div class="stat-card"><div class="stat-num" id="statWalkIn" style="color:#a78bfa">0</div><div class="stat-label">현장 등록</div></div>
+        <div class="stat-card"><div class="stat-num" id="statRate" style="color:var(--accent2)">0%</div><div class="stat-label">사전 참석률</div></div>
       </div>
-      <div class="stat-card">
-        <div class="stat-num" id="statDone" style="color:var(--accent)">0</div>
-        <div class="stat-label">체크인 완료</div>
+      <div class="card" style="padding:16px 24px;">
+        <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
+        <div class="progress-text" id="progressText"></div>
       </div>
-      <div class="stat-card">
-        <div class="stat-num" id="statWalkIn" style="color:#a78bfa">0</div>
-        <div class="stat-label">현장 등록</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-num" id="statRate" style="color:var(--accent2)">0%</div>
-        <div class="stat-label">사전 참석률</div>
-      </div>
-    </div>
-    <div class="card" style="padding:18px 26px;">
-      <div class="progress-bar"><div class="progress-fill" id="progressFill" style="width:0%"></div></div>
-      <div class="progress-text" id="progressText">0 / 0 명 체크인</div>
-    </div>
-    <div class="card">
-      <div class="search-row">
-        <input type="text" placeholder="이름, 소속 검색..." oninput="filterTable(this.value)">
-        <button class="btn btn-primary" onclick="downloadCSV()">⬇️ CSV 다운로드</button>
-        <button class="btn btn-secondary" onclick="refreshDashboard()">🔄 새로고침</button>
-      </div>
-      <div class="table-wrap" id="dashTable">
-        <div class="empty-state"><div class="empty-icon">📊</div><p>아직 체크인 데이터가 없습니다</p></div>
+      <div class="card">
+        <div class="search-row">
+          <input type="text" id="dashSearch" placeholder="이름, 소속 검색..." oninput="filterTable(this.value)">
+          <button class="btn btn-p" onclick="downloadCSV()">⬇️ CSV 다운로드</button>
+          <button class="btn btn-s" onclick="refreshDashboard()">🔄 새로고침</button>
+        </div>
+        <div class="table-wrap" id="dashTable">
+          <div class="empty-state"><div class="empty-icon">📊</div><p>아직 체크인 데이터가 없습니다</p></div>
+        </div>
       </div>
     </div>
   </div>
 </div>
 
 <div id="toast"></div>
-
-<script>
-let preRegistered = [];
-let checkins = [];
-let directEntries = [];
-
-// ── localStorage 저장/복원 ──
-const STORAGE_KEY = 'qrcheckin_data';
-
-function saveState() {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      eventName: document.getElementById('eventNameInput').value.trim(),
-      preRegistered,
-      checkins,
-      directEntries
-    }));
-  } catch(e) { console.warn('저장 실패:', e); }
-}
-
-function loadState() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return;
-    const s = JSON.parse(raw);
-    preRegistered = s.preRegistered || [];
-    checkins      = s.checkins      || [];
-    directEntries = s.directEntries || [];
-
-    if (s.eventName) {
-      document.getElementById('eventNameInput').value = s.eventName;
-      updateEventName();
-    }
-    renderDirectList();
-    showPreview();
-    refreshDashboard();
-    if (preRegistered.length || checkins.length) {
-      showToast('✅ 이전 데이터를 불러왔습니다', 'success');
-    }
-  } catch(e) { console.warn('복원 실패:', e); }
-}
-
-// ── Tabs ──
-function switchTab(name) {
-  const names = ['setup','qr','dashboard'];
-  document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', names[i] === name));
-  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-  document.getElementById('panel-' + name).classList.add('active');
-  if (name === 'qr') {
-    const ev = document.getElementById('eventNameInput').value.trim();
-    document.getElementById('qrEventInput').value = ev;
-    renderQR();
-  }
-  if (name === 'dashboard') refreshDashboard();
-}
-
-// ── Event name ──
-function updateEventName() {
-  const v = document.getElementById('eventNameInput').value.trim();
-  document.getElementById('eventNameDisplay').textContent = v || '이벤트를 설정해주세요';
-  saveState();
-}
-
-function syncEventName(v) {
-  document.getElementById('eventNameInput').value = v;
-  document.getElementById('eventNameDisplay').textContent = v || '이벤트를 설정해주세요';
-}
-
-function generateQR() {
-  const v = document.getElementById('qrEventInput').value.trim();
-  if (!v) { showToast('이벤트 이름을 입력해주세요', 'error'); return; }
-  syncEventName(v);
-  renderQR();
-}
-
-// ── Subtabs ──
-function switchSubtab(name) {
-  ['direct','csv'].forEach(n => {
-    document.getElementById('subtab-' + n).classList.toggle('active', n === name);
-    document.getElementById('subpanel-' + n).style.display = n === name ? '' : 'none';
-  });
-}
-
-// ── Direct entry ──
-function addDirectEntry() {
-  const nameEl = document.getElementById('directName');
-  const orgEl = document.getElementById('directOrg');
-  const name = nameEl.value.trim(), org = orgEl.value.trim();
-  if (!name) { nameEl.focus(); showToast('이름을 입력해주세요', 'error'); return; }
-  directEntries.push({ name, org });
-  nameEl.value = ''; orgEl.value = ''; nameEl.focus();
-  renderDirectList(); commitPreRegistered();
-}
-
-function removeDirectEntry(idx) {
-  directEntries.splice(idx, 1);
-  renderDirectList(); commitPreRegistered();
-}
-
-function renderDirectList() {
-  const el = document.getElementById('directList');
-  el.innerHTML = directEntries.map((e, i) => `
-    <div class="entry-row">
-      <span class="en">${e.name}</span>
-      <span class="eo">${e.org || '소속 없음'}</span>
-      <button class="entry-del" onclick="removeDirectEntry(${i})">✕</button>
-    </div>`).join('');
-}
-
-function applyBulkInput() {
-  const raw = document.getElementById('bulkInput').value.trim();
-  if (!raw) return;
-  let added = 0;
-  raw.split('\n').filter(l => l.trim()).forEach(line => {
-    const p = line.split(',');
-    const name = p[0]?.trim(), org = p[1]?.trim() || '';
-    if (name) { directEntries.push({ name, org }); added++; }
-  });
-  document.getElementById('bulkInput').value = '';
-  renderDirectList(); commitPreRegistered();
-  showToast(`✅ ${added}명이 추가되었습니다`, 'success');
-}
-
-function commitPreRegistered() {
-  preRegistered = directEntries.map((e, i) => ({
-    id: 'pre_' + (i+1).toString().padStart(4,'0'), name: e.name, org: e.org
-  }));
-  showPreview(); refreshDashboard();
-}
-
-// ── CSV ──
-function loadCSV(event) {
-  const file = event.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = e => parseCSV(e.target.result);
-  reader.readAsText(file, 'UTF-8');
-}
-
-function parseCSV(text) {
-  const lines = text.trim().split('\n').filter(l => l.trim());
-  if (lines.length < 2) { showToast('CSV 파일에 데이터가 없습니다', 'error'); return; }
-  directEntries = lines.slice(1).map(line => {
-    const cols = line.split(',').map(c => c.trim().replace(/^"|"$/g,''));
-    return { name: cols[0] || '', org: cols[1] || '' };
-  }).filter(e => e.name);
-  renderDirectList(); commitPreRegistered();
-  showToast(`✅ ${directEntries.length}명의 명단이 로드되었습니다`, 'success');
-}
-
-function loadSample() {
-  parseCSV(`이름,소속\n김민준,개발팀\n이서연,디자인팀\n박지훈,기획팀\n최유진,마케팅팀\n정도윤,개발팀\n강예은,인사팀\n윤시우,개발팀\n임하은,디자인팀\n한지민,기획팀\n오준서,마케팅팀`);
-}
-
-function resetAll() {
-  if ((preRegistered.length || checkins.length) && !confirm('모든 데이터를 초기화하시겠습니까?')) return;
-  preRegistered = []; directEntries = []; checkins = [];
-  renderDirectList();
-  document.getElementById('previewCard').style.display = 'none';
-  refreshDashboard();
-  try { localStorage.removeItem(STORAGE_KEY); } catch(e) {}
-  showToast('초기화되었습니다', 'success');
-}
-
-function showPreview() {
-  const card = document.getElementById('previewCard');
-  if (!preRegistered.length) { card.style.display = 'none'; return; }
-  card.style.display = 'block';
-  document.getElementById('previewCount').textContent = `(총 ${preRegistered.length}명)`;
-  document.getElementById('previewTable').innerHTML = `
-    <table>
-      <thead><tr><th>이름</th><th>소속</th></tr></thead>
-      <tbody>${preRegistered.slice(0,10).map(a =>
-        `<tr><td style="font-weight:700">${a.name}</td><td>${a.org || '-'}</td></tr>`).join('')}
-      </tbody>
-    </table>
-    ${preRegistered.length > 10 ? `<div style="text-align:center;padding:10px;color:var(--muted);font-size:0.8rem">...외 ${preRegistered.length-10}명</div>` : ''}`;
-}
-
-// ── QR 생성 ──
-function renderQR() {
-  const eventName = document.getElementById('eventNameInput').value.trim();
-  document.getElementById('qrNotReady').style.display = eventName ? 'none' : '';
-  document.getElementById('qrReady').style.display = eventName ? 'flex' : 'none';
-  if (!eventName) return;
-
-  const url = location.href.split('?')[0] + '?checkin=1&event=' + encodeURIComponent(eventName);
-  document.getElementById('qrUrlBox').textContent = url;
-  document.getElementById('qrEventLabel').textContent = eventName;
-
-  loadQRLib(function() {
-    const canvas = document.getElementById('qrCanvas');
-    canvas.innerHTML = '';
-    try {
-      new QRCode(canvas, {
-        text: url, width: 220, height: 220,
-        colorDark: '#000', colorLight: '#fff',
-        correctLevel: QRCode.CorrectLevel.H
-      });
-    } catch(e) {
-      canvas.innerHTML = '<div style="color:#ff6b6b;font-size:0.82rem;padding:10px;">QR 생성 오류: ' + e.message + '</div>';
-    }
-  });
-}
-
-function printQR() { window.print(); }
-
-// ── 체크인 모달 ──
-function openCheckinModal() {
-  const eventName = document.getElementById('eventNameInput').value.trim();
-  document.getElementById('modalEventSub').textContent =
-    (eventName ? `[${eventName}]\n` : '') + '이름과 소속을 입력하여 참석을 확인해주세요.';
-  document.getElementById('modalFormView').style.display = '';
-  document.getElementById('modalSuccessView').style.display = 'none';
-  document.getElementById('modalName').value = '';
-  document.getElementById('modalOrg').value = '';
-  document.getElementById('modalError').style.display = 'none';
-  document.getElementById('checkinModal').classList.add('open');
-  setTimeout(() => document.getElementById('modalName').focus(), 300);
-}
-
-function closeModal() {
-  document.getElementById('checkinModal').classList.remove('open');
-}
-
-function submitCheckin() {
-  const name = document.getElementById('modalName').value.trim();
-  const org = document.getElementById('modalOrg').value.trim();
-  const errEl = document.getElementById('modalError');
-
-  if (!name) { errEl.textContent = '이름을 입력해주세요.'; errEl.style.display = ''; document.getElementById('modalName').focus(); return; }
-
-  const already = checkins.find(c => c.name === name);
-  if (already) {
-    errEl.textContent = `'${name}'님은 이미 참석 처리되었습니다. (${already.time})`;
-    errEl.style.display = ''; return;
-  }
-
-  errEl.style.display = 'none';
-  const now = new Date();
-  const time = now.toLocaleDateString('ko-KR', {month:'2-digit', day:'2-digit'}).replace('. ', '/').replace('.', '') + ' ' + now.toLocaleTimeString('ko-KR', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
-  const pre = preRegistered.find(p => p.name === name);
-  const walkIn = !pre;
-  const finalOrg = org || pre?.org || '';
-
-  checkins.push({ id: 'ci_' + Date.now(), name, org: finalOrg, time, walkIn });
-  refreshDashboard(); saveState();
-
-  document.getElementById('modalFormView').style.display = 'none';
-  document.getElementById('modalSuccessView').style.display = '';
-  document.getElementById('successName').textContent = name;
-  document.getElementById('successOrg').textContent = finalOrg || '소속 없음';
-  document.getElementById('successTime').textContent = `참석 시각: ${time}  ·  ${walkIn ? '현장 등록' : '사전 등록'}`;
-
-  // 3초 카운트다운 후 탭 자동 닫기
-  let count = 3;
-  const countEl = document.getElementById('successCountdown');
-  countEl.textContent = `${count}초 후 자동으로 닫힙니다...`;
-  const timer = setInterval(() => {
-    count--;
-    if (count > 0) {
-      countEl.textContent = `${count}초 후 자동으로 닫힙니다...`;
-    } else {
-      clearInterval(timer);
-      window.close();
-      if (!window.closed) window.history.back();
-    }
-  }, 1000);
-}
-
-// ── Dashboard ──
-function refreshDashboard() {
-  const total = preRegistered.length;
-  const done = checkins.filter(c => !c.walkIn).length;
-  const walkIn = checkins.filter(c => c.walkIn).length;
-  const rate = total ? Math.round(done / total * 100) : 0;
-
-  document.getElementById('statTotal').textContent = total;
-  document.getElementById('statDone').textContent = done;
-  document.getElementById('statWalkIn').textContent = walkIn;
-  document.getElementById('statRate').textContent = rate + '%';
-  document.getElementById('progressFill').style.width = (total ? done/total*100 : 0) + '%';
-  document.getElementById('progressText').textContent = `사전 등록자 ${done}/${total}명 체크인 · 현장 등록 ${walkIn}명`;
-  renderTable(buildRows());
-}
-
-function buildRows(query) {
-  const rows = [];
-  preRegistered.forEach(p => {
-    const c = checkins.find(ci => ci.name === p.name);
-    rows.push({ name: p.name, org: p.org, checkedIn: !!c, time: c?.time || '', walkIn: false, checkinId: c?.id || null });
-  });
-  checkins.filter(c => c.walkIn).forEach(c => {
-    rows.push({ name: c.name, org: c.org, checkedIn: true, time: c.time, walkIn: true, checkinId: c.id });
-  });
-  if (query) return rows.filter(r => r.name.includes(query) || r.org.includes(query));
-  return rows;
-}
-
-function deleteCheckin(checkinId, name) {
-  if (!confirm(`'${name}'님의 체크인 기록을 삭제하시겠습니까?`)) return;
-  checkins = checkins.filter(c => c.id !== checkinId);
-  refreshDashboard(); saveState();
-  showToast(`🗑️ ${name}님 체크인 기록이 삭제되었습니다`, 'success');
-}
-
-function renderTable(rows) {
-  const wrap = document.getElementById('dashTable');
-  if (!rows.length) { wrap.innerHTML = '<div class="empty-state"><div class="empty-icon">📊</div><p>아직 체크인 데이터가 없습니다</p></div>'; return; }
-  wrap.innerHTML = `<table>
-    <thead><tr><th>이름</th><th>소속</th><th>구분</th><th>상태</th><th>체크인 일시</th><th>삭제</th></tr></thead>
-    <tbody>${rows.map(r => `
-      <tr>
-        <td style="font-weight:700">${r.name}</td>
-        <td>${r.org || '-'}</td>
-        <td>${r.walkIn ? '<span class="badge badge-walkin">현장</span>' : '<span style="font-size:0.76rem;color:var(--muted)">사전</span>'}</td>
-        <td><span class="badge ${r.checkedIn ? 'badge-done' : 'badge-wait'}">${r.checkedIn ? '✅ 완료' : '⏳ 대기'}</span></td>
-        <td style="font-family:\'IBM Plex Mono\',monospace;font-size:0.78rem;color:${r.checkedIn ? 'var(--accent)' : 'var(--muted)'}">${r.time || '-'}</td>
-        <td>${r.checkinId ? `<button onclick="deleteCheckin('${r.checkinId}','${r.name}')" style="background:none;border:1px solid #3a2a2a;border-radius:6px;color:var(--warn);cursor:pointer;padding:3px 9px;font-size:0.76rem;transition:all 0.15s;" onmouseover="this.style.background='rgba(255,107,107,0.12)'" onmouseout="this.style.background='none'">삭제</button>` : '-'}</td>
-      </tr>`).join('')}
-    </tbody>
-  </table>`;
-}
-
-function filterTable(q) { renderTable(buildRows(q || '')); }
-
-function downloadCSV() {
-  const rows = buildRows();
-  if (!rows.length) { showToast('다운로드할 데이터가 없습니다', 'error'); return; }
-  const data = [['이름','소속','구분','체크인여부','체크인일시'],
-    ...rows.map(r => [r.name, r.org, r.walkIn ? '현장등록' : '사전등록', r.checkedIn ? '완료' : '미완료', r.time || ''])];
-  const csv = '\uFEFF' + data.map(r => r.join(',')).join('\n');
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8;' }));
-  a.download = `참석결과_${new Date().toLocaleDateString('ko-KR').replace(/\. /g,'-').replace('.','')}.csv`;
-  a.click();
-  showToast('📥 CSV 다운로드 완료', 'success');
-}
-
-// ── Toast ──
-function showToast(msg, type) {
-  const t = document.getElementById('toast');
-  t.textContent = msg; t.className = 'show ' + type;
-  clearTimeout(t._timer);
-  t._timer = setTimeout(() => t.className = '', 2800);
-}
-
-// ── Drag & Drop ──
-const uz = document.getElementById('uploadZone');
-uz.addEventListener('dragover', e => { e.preventDefault(); uz.style.borderColor = 'var(--accent)'; });
-uz.addEventListener('dragleave', () => uz.style.borderColor = 'var(--border)');
-uz.addEventListener('drop', e => {
-  e.preventDefault(); uz.style.borderColor = 'var(--border)';
-  const file = e.dataTransfer.files[0];
-  if (file?.name.endsWith('.csv')) { const r = new FileReader(); r.onload = ev => parseCSV(ev.target.result); r.readAsText(file,'UTF-8'); }
-});
-
-// ── URL 파라미터로 자동 체크인 모달 오픈 ──
-window.addEventListener('DOMContentLoaded', () => {
-  loadState();
-  const params = new URLSearchParams(location.search);
-  if (params.get('checkin') === '1') {
-    const eventName = params.get('event') || '';
-    if (eventName) {
-      document.getElementById('eventNameInput').value = eventName;
-      updateEventName();
-    }
-    openCheckinModal();
-  }
-});
-
-document.getElementById('checkinModal').addEventListener('click', function(e) {
-  if (e.target === this) closeModal();
-});
-</script>
 </body>
 </html>
