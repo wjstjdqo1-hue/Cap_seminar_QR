@@ -4,7 +4,26 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>QR 참석 확인 시스템</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+<script>
+// QRCode 라이브러리 동적 로드 (CDN 폴백 포함)
+function loadQRLib(callback) {
+  if (window.QRCode) { callback(); return; }
+  const urls = [
+    'https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js',
+    'https://cdn.jsdelivr.net/npm/qrcodejs@1.0.0/qrcode.min.js'
+  ];
+  let idx = 0;
+  function tryLoad() {
+    if (idx >= urls.length) { console.error('QRCode 라이브러리 로드 실패'); return; }
+    const s = document.createElement('script');
+    s.src = urls[idx++];
+    s.onload = callback;
+    s.onerror = tryLoad;
+    document.head.appendChild(s);
+  }
+  tryLoad();
+}
+</script>
 <link href="https://fonts.googleapis.com/css2?family=Gmarket+Sans:wght@300;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">
 <style>
   :root {
@@ -166,11 +185,11 @@
       <div class="modal-sub" id="modalEventSub">이름과 소속을 입력하여 참석을 확인해주세요.</div>
       <div class="modal-field">
         <label>이름 *</label>
-        <input type="text" id="modalName" placeholder="홍길동" onkeydown="if(event.key==='Enter')document.getElementById('modalOrg').focus()">
+        <input type="text" id="modalName" placeholder="전성배" onkeydown="if(event.key==='Enter')document.getElementById('modalOrg').focus()">
       </div>
       <div class="modal-field">
         <label>소속</label>
-        <input type="text" id="modalOrg" placeholder="예: 개발팀" onkeydown="if(event.key==='Enter')submitCheckin()">
+        <input type="text" id="modalOrg" placeholder="예: NICE평가정보" onkeydown="if(event.key==='Enter')submitCheckin()">
       </div>
       <div id="modalError" style="font-size:0.82rem;color:var(--warn);margin-bottom:8px;display:none;padding:10px 12px;background:rgba(255,107,107,0.08);border-radius:8px;"></div>
       <button class="modal-submit" onclick="submitCheckin()">참석 확인 ✓</button>
@@ -266,10 +285,19 @@
   <div id="panel-qr" class="panel">
     <div class="card">
       <div class="card-title">이벤트 체크인 QR 코드</div>
+
+      <div style="display:flex;gap:10px;align-items:center;margin-bottom:18px;">
+        <input type="text" id="qrEventInput" placeholder="이벤트 이름 입력 후 QR 생성..."
+          style="flex:1"
+          onkeydown="if(event.key==='Enter')generateQR()"
+          oninput="syncEventName(this.value)">
+        <button class="btn btn-primary" onclick="generateQR()">🔳 QR 생성</button>
+      </div>
+
       <div id="qrNotReady">
         <div class="empty-state">
-          <div class="empty-icon">⚠️</div>
-          <p>설정 탭에서 이벤트 이름을 먼저 입력해주세요</p>
+          <div class="empty-icon">🔳</div>
+          <p>이벤트 이름을 입력하고 QR 생성 버튼을 눌러주세요</p>
         </div>
       </div>
       <div id="qrReady" class="qr-display-wrap" style="display:none">
@@ -348,7 +376,11 @@ function switchTab(name) {
   document.querySelectorAll('.tab').forEach((t,i) => t.classList.toggle('active', names[i] === name));
   document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
   document.getElementById('panel-' + name).classList.add('active');
-  if (name === 'qr') renderQR();
+  if (name === 'qr') {
+    const ev = document.getElementById('eventNameInput').value.trim();
+    document.getElementById('qrEventInput').value = ev;
+    renderQR();
+  }
   if (name === 'dashboard') refreshDashboard();
 }
 
@@ -356,6 +388,18 @@ function switchTab(name) {
 function updateEventName() {
   const v = document.getElementById('eventNameInput').value.trim();
   document.getElementById('eventNameDisplay').textContent = v || '이벤트를 설정해주세요';
+}
+
+function syncEventName(v) {
+  document.getElementById('eventNameInput').value = v;
+  document.getElementById('eventNameDisplay').textContent = v || '이벤트를 설정해주세요';
+}
+
+function generateQR() {
+  const v = document.getElementById('qrEventInput').value.trim();
+  if (!v) { showToast('이벤트 이름을 입력해주세요', 'error'); return; }
+  syncEventName(v);
+  renderQR();
 }
 
 // ── Subtabs ──
@@ -462,8 +506,6 @@ function showPreview() {
 }
 
 // ── QR 생성 ──
-let qrInstance = null;
-
 function renderQR() {
   const eventName = document.getElementById('eventNameInput').value.trim();
   document.getElementById('qrNotReady').style.display = eventName ? 'none' : '';
@@ -474,9 +516,19 @@ function renderQR() {
   document.getElementById('qrUrlBox').textContent = url;
   document.getElementById('qrEventLabel').textContent = eventName;
 
-  const canvas = document.getElementById('qrCanvas');
-  canvas.innerHTML = '';
-  new QRCode(canvas, { text: url, width: 220, height: 220, colorDark: '#000', colorLight: '#fff', correctLevel: QRCode.CorrectLevel.H });
+  loadQRLib(function() {
+    const canvas = document.getElementById('qrCanvas');
+    canvas.innerHTML = '';
+    try {
+      new QRCode(canvas, {
+        text: url, width: 220, height: 220,
+        colorDark: '#000', colorLight: '#fff',
+        correctLevel: QRCode.CorrectLevel.H
+      });
+    } catch(e) {
+      canvas.innerHTML = '<div style="color:#ff6b6b;font-size:0.82rem;padding:10px;">QR 생성 오류: ' + e.message + '</div>';
+    }
+  });
 }
 
 function printQR() { window.print(); }
