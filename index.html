@@ -11,6 +11,7 @@
   // ════════════════════════════════
   //  ★ Firebase 설정 (여기만 수정)
   // ════════════════════════════════
+  const LOGO_B64 = "data:image/webp;base64,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";
   const FIREBASE_CONFIG = {
     apiKey:            "AIzaSyCCfwomwCNymNeynUm-jy0oOITgXeoWLfU",
     authDomain:        "cap-seminar-qr.firebaseapp.com",
@@ -326,12 +327,52 @@
     document.getElementById('qrUrlBox').textContent    = url;
     document.getElementById('qrEventLabel').textContent = eventName;
     loadQRLib(() => {
-      const canvas = document.getElementById('qrCanvas');
-      canvas.innerHTML = '';
+      const wrap = document.getElementById('qrCanvas');
+      wrap.innerHTML = '';
       try {
-        new window.QRCode(canvas, { text: url, width: 220, height: 220, colorDark:'#000', colorLight:'#fff', correctLevel: window.QRCode.CorrectLevel.H });
+        // QRCode 생성 (임시 div)
+        const tmpDiv = document.createElement('div');
+        new window.QRCode(tmpDiv, { text: url, width: 220, height: 220, colorDark:'#000', colorLight:'#fff', correctLevel: window.QRCode.CorrectLevel.H });
+
+        // QRCode가 img 또는 canvas를 생성하므로 잠시 후 합성
+        setTimeout(() => {
+          const qrImg = tmpDiv.querySelector('img') || tmpDiv.querySelector('canvas');
+          if (!qrImg) { wrap.appendChild(tmpDiv); return; }
+
+          // 합성용 canvas 생성
+          const cvs = document.createElement('canvas');
+          cvs.width = 220; cvs.height = 220;
+          cvs.style.borderRadius = '8px';
+          const ctx = cvs.getContext('2d');
+
+          const drawQR = () => {
+            ctx.drawImage(qrImg, 0, 0, 220, 220);
+            // 로고 중앙 삽입
+            const logo = new Image();
+            logo.onload = () => {
+              const size = 44; // QR의 약 20% 크기
+              const x = (220 - size) / 2;
+              const y = (220 - size) / 2;
+              // 흰 배경 원
+              ctx.fillStyle = '#ffffff';
+              ctx.beginPath();
+              ctx.roundRect(x - 4, y - 4, size + 8, size + 8, 6);
+              ctx.fill();
+              ctx.drawImage(logo, x, y, size, size);
+              wrap.appendChild(cvs);
+            };
+            logo.src = LOGO_B64;
+          };
+
+          if (qrImg.tagName === 'IMG') {
+            if (qrImg.complete) drawQR();
+            else qrImg.onload = drawQR;
+          } else {
+            drawQR();
+          }
+        }, 100);
       } catch(e) {
-        canvas.innerHTML = `<div style="color:#ff6b6b;font-size:0.82rem;padding:10px;">QR 생성 오류: ${e.message}</div>`;
+        wrap.innerHTML = `<div style="color:#ff6b6b;font-size:0.82rem;padding:10px;">QR 생성 오류: ${e.message}</div>`;
       }
     });
   };
@@ -687,7 +728,7 @@
     <div style="font-family:'IBM Plex Mono',monospace;font-size:.78rem;color:var(--accent2);margin-bottom:28px;" id="done_time"></div>
     <div style="background:rgba(0,229,160,0.07);border:1px solid rgba(0,229,160,0.2);border-radius:12px;padding:16px 20px;font-size:.88rem;color:var(--muted);line-height:1.7;">
       참석이 완료되었습니다.<br>
-      <span style="color:var(--text);font-weight:700;">이 페이지는 이미 사용된 링크입니다.</span>
+  
     </div>
   </div>
 </div>
