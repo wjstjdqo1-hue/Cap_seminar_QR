@@ -1,174 +1,4 @@
-<!DOCTYPE html>
-<html lang="ko">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>QR 참석 확인 시스템</title>
-<script type="module">
-  import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
-  import { getDatabase, ref, onValue, push, remove, set, get } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js';
 
-  // ════════════════════════════════
-  //  ★ Firebase 설정 (여기만 수정)
-  // ════════════════════════════════
-  const LOGO_B64 = "data:image/webp;base64,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";
-  const FIREBASE_CONFIG = {
-    apiKey:            "AIzaSyCCfwomwCNymNeynUm-jy0oOITgXeoWLfU",
-    authDomain:        "cap-seminar-qr.firebaseapp.com",
-    databaseURL:       "https://cap-seminar-qr-default-rtdb.firebaseio.com",
-    projectId:         "cap-seminar-qr",
-    storageBucket:     "cap-seminar-qr.firebasestorage.app",
-    messagingSenderId: "559866473857",
-    appId:             "1:559866473857:web:e47c1944724ff9a3460c80"
-  };
-  // ════════════════════════════════
-
-  let db = null;
-  let checkins = {};       // Firebase 데이터 (key→{name,org,time,walkIn})
-  let preRegistered = [];  // 사전 등록 명단
-  let directEntries = [];  // 직접 입력 임시 목록
-  let isCheckinMode = false;
-
-  // ── Firebase 초기화 ──
-  function initFirebase() {
-    try {
-      if (FIREBASE_CONFIG.apiKey === 'YOUR_API_KEY') return false;
-      const app = initializeApp(FIREBASE_CONFIG);
-      db = getDatabase(app);
-      return true;
-    } catch(e) {
-      console.error('Firebase 초기화 실패:', e);
-      return false;
-    }
-  }
-
-  // ── 체크인 실시간 구독 ──
-  function subscribeCheckins(eventName) {
-    if (!db || !eventName) return;
-    const r = ref(db, `events/${encodeKey(eventName)}/checkins`);
-    onValue(r, snap => {
-      checkins = snap.val() || {};
-      refreshDashboard();
-      updateCheckinCount();
-    });
-  }
-
-  // ── 사전 명단 실시간 구독 ──
-  function subscribePreRegistered(eventName) {
-    if (!db || !eventName) return;
-    const r = ref(db, `events/${encodeKey(eventName)}/preRegistered`);
-    onValue(r, snap => {
-      preRegistered = snap.val() ? Object.values(snap.val()) : [];
-      showPreview();
-      refreshDashboard();
-    });
-  }
-
-  // ── 사전 명단 저장 ──
-  async function savePreRegistered(eventName, list) {
-    if (!db || !eventName) return;
-    const obj = {};
-    list.forEach((e, i) => { obj[`p${i}`] = e; });
-    await set(ref(db, `events/${encodeKey(eventName)}/preRegistered`), obj);
-  }
-
-  // ── 체크인 추가 ──
-  async function addCheckin(eventName, record) {
-    if (!db) return;
-    await push(ref(db, `events/${encodeKey(eventName)}/checkins`), record);
-  }
-
-  // ── 체크인 삭제 ──
-  async function removeCheckin(eventName, key) {
-    if (!db) return;
-    await remove(ref(db, `events/${encodeKey(eventName)}/checkins/${key}`));
-  }
-
-  // ── 중복 체크 (Firebase에서 현재 체크인 목록 확인) ──
-  async function isAlreadyCheckedIn(eventName, name) {
-    if (!db) return false;
-    const snap = await get(ref(db, `events/${encodeKey(eventName)}/checkins`));
-    const data = snap.val() || {};
-    return Object.values(data).some(c => c.name === name);
-  }
-
-  function encodeKey(str) {
-    return str.replace(/[.#$[\]/]/g, '_');
-  }
-
-  // ════════════════════════════════
-  //  DOM 준비 후 실행
-  // ════════════════════════════════
-  window.addEventListener('DOMContentLoaded', () => {
-    const firebaseOk = initFirebase();
-
-    // Firebase 설정 안내 배너
-    const banner = document.getElementById('firebaseBanner');
-    if (!firebaseOk) {
-      banner.style.display = 'flex';
-    }
-
-    // URL 파라미터 확인 → 참석자 모드
-    const params = new URLSearchParams(location.search);
-    if (params.get('checkin') === '1') {
-      isCheckinMode = true;
-      const eventName = params.get('event') || '';
-      document.getElementById('adminView').style.display = 'none';
-      document.getElementById('checkinView').style.display = 'flex';
-      if (eventName) {
-        document.getElementById('checkinEventSub').textContent = eventName;
-      }
-      // 이미 제출 완료한 경우 완료 화면 바로 표시
-      const submitted = sessionStorage.getItem('checkin_submitted');
-      if (submitted) {
-        showDoneScreen(JSON.parse(submitted));
-        return;
-      }
-      document.getElementById('ci_name').focus();
-      return;
-    }
-
-    // 운영자 모드 → localStorage 복원
-    loadLocalState();
-  });
-
-  // ════════════════════════════════
-  //  운영자 - 로컬 상태 관리
-  // ════════════════════════════════
-  const LS_KEY = 'qrcheckin_admin';
-
-  function loadLocalState() {
-    try {
-      const s = JSON.parse(localStorage.getItem(LS_KEY) || '{}');
-      if (s.eventName) {
-        document.getElementById('eventNameInput').value = s.eventName;
-        document.getElementById('qrEventInput').value = s.eventName;
-        updateEventNameDisplay(s.eventName);
-      }
-      if (s.directEntries) {
-        directEntries = s.directEntries;
-        preRegistered = directEntries.map((e,i) => ({id:`pre_${i}`, name:e.name, org:e.org}));
-        renderDirectList();
-        showPreview();
-      }
-      const ev = document.getElementById('eventNameInput').value.trim();
-      if (ev && db) {
-        subscribeCheckins(ev);
-        subscribePreRegistered(ev);
-      }
-    } catch(e) {}
-  }
-
-  function saveLocalState() {
-    try {
-      localStorage.setItem(LS_KEY, JSON.stringify({
-        eventName: document.getElementById('eventNameInput').value.trim(),
-        directEntries
-      }));
-    } catch(e) {}
-  }
-
-  // ── 이벤트 이름 ──
   function updateEventNameDisplay(v) {
     document.getElementById('eventNameDisplay').textContent = v || '이벤트를 설정해주세요';
   }
@@ -332,31 +162,35 @@
       try {
         // QRCode 생성 (임시 div)
         const tmpDiv = document.createElement('div');
-        new window.QRCode(tmpDiv, { text: url, width: 220, height: 220, colorDark:'#000', colorLight:'#fff', correctLevel: window.QRCode.CorrectLevel.H });
+        const QR_SIZE = 880; // 고해상도 생성
+        new window.QRCode(tmpDiv, { text: url, width: QR_SIZE, height: QR_SIZE, colorDark:'#000', colorLight:'#fff', correctLevel: window.QRCode.CorrectLevel.H });
 
         // QRCode가 img 또는 canvas를 생성하므로 잠시 후 합성
         setTimeout(() => {
           const qrImg = tmpDiv.querySelector('img') || tmpDiv.querySelector('canvas');
           if (!qrImg) { wrap.appendChild(tmpDiv); return; }
 
-          // 합성용 canvas 생성
+          // 합성용 canvas 생성 (고해상도)
           const cvs = document.createElement('canvas');
-          cvs.width = 220; cvs.height = 220;
+          cvs.width = QR_SIZE; cvs.height = QR_SIZE;
+          cvs.style.width = '220px'; cvs.style.height = '220px'; // CSS로 축소 표시
           cvs.style.borderRadius = '8px';
+          cvs.style.imageRendering = 'crisp-edges';
           const ctx = cvs.getContext('2d');
 
           const drawQR = () => {
-            ctx.drawImage(qrImg, 0, 0, 220, 220);
+            ctx.drawImage(qrImg, 0, 0, QR_SIZE, QR_SIZE);
             // 로고 중앙 삽입
             const logo = new Image();
             logo.onload = () => {
-              const size = 44; // QR의 약 20% 크기
-              const x = (220 - size) / 2;
-              const y = (220 - size) / 2;
-              // 흰 배경 원
+              const size = Math.round(QR_SIZE * 0.18); // QR의 18% 크기
+              const x = (QR_SIZE - size) / 2;
+              const y = (QR_SIZE - size) / 2;
+              // 흰 배경 박스
+              const pad = Math.round(QR_SIZE * 0.02);
               ctx.fillStyle = '#ffffff';
               ctx.beginPath();
-              ctx.roundRect(x - 4, y - 4, size + 8, size + 8, 6);
+              ctx.roundRect(x - pad, y - pad, size + pad*2, size + pad*2, 8);
               ctx.fill();
               ctx.drawImage(logo, x, y, size, size);
               wrap.appendChild(cvs);
@@ -758,7 +592,7 @@
       <div class="card">
         <div class="card-title">이벤트 정보</div>
         <label>이벤트 이름</label>
-        <input type="text" id="eventNameInput" placeholder="예: 2025 개발자 컨퍼런스" oninput="updateEventName()">
+        <input type="text" id="eventNameInput" placeholder="예: 2026년 NICE평가정보 캐피탈업권 세미나" oninput="updateEventName()">
       </div>
 
       <div class="card">
@@ -780,8 +614,8 @@
           </div>
           <div id="directList" style="display:flex;flex-direction:column;gap:6px;max-height:240px;overflow-y:auto;margin-bottom:14px;"></div>
           <div style="font-size:.82rem;color:var(--muted);margin-bottom:8px;">여러 명 한번에 입력 (이름,소속):</div>
-          <textarea id="bulkInput" placeholder="김민준,개발팀
-이서연,디자인팀"></textarea>
+          <textarea id="bulkInput" placeholder="전성배,NICE평가정보
+강현진,NICE평가정보"></textarea>
           <div class="flex-row mt-12">
             <button class="btn btn-p" onclick="applyBulkInput()">📋 일괄 추가</button>
             <button class="btn btn-s" onclick="loadSample()">🧪 샘플 데이터</button>
