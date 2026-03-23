@@ -201,7 +201,8 @@ function loadQRLib(callback) {
         <div class="success-name" id="successName"></div>
         <div class="success-org" id="successOrg"></div>
         <div class="success-time" id="successTime"></div>
-        <button class="modal-close-btn" style="margin-top:24px" onclick="closeModal()">확인</button>
+        <div id="successCountdown" style="font-size:0.78rem;color:var(--muted);margin-top:14px;"></div>
+        <button class="modal-close-btn" style="margin-top:10px" onclick="closeModal()">바로 닫기</button>
       </div>
     </div>
   </div>
@@ -370,6 +371,42 @@ let preRegistered = [];
 let checkins = [];
 let directEntries = [];
 
+// ── localStorage 저장/복원 ──
+const STORAGE_KEY = 'qrcheckin_data';
+
+function saveState() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      eventName: document.getElementById('eventNameInput').value.trim(),
+      preRegistered,
+      checkins,
+      directEntries
+    }));
+  } catch(e) { console.warn('저장 실패:', e); }
+}
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return;
+    const s = JSON.parse(raw);
+    preRegistered = s.preRegistered || [];
+    checkins      = s.checkins      || [];
+    directEntries = s.directEntries || [];
+
+    if (s.eventName) {
+      document.getElementById('eventNameInput').value = s.eventName;
+      updateEventName();
+    }
+    renderDirectList();
+    showPreview();
+    refreshDashboard();
+    if (preRegistered.length || checkins.length) {
+      showToast('✅ 이전 데이터를 불러왔습니다', 'success');
+    }
+  } catch(e) { console.warn('복원 실패:', e); }
+}
+
 // ── Tabs ──
 function switchTab(name) {
   const names = ['setup','qr','dashboard'];
@@ -388,6 +425,7 @@ function switchTab(name) {
 function updateEventName() {
   const v = document.getElementById('eventNameInput').value.trim();
   document.getElementById('eventNameDisplay').textContent = v || '이벤트를 설정해주세요';
+  saveState();
 }
 
 function syncEventName(v) {
@@ -487,6 +525,7 @@ function resetAll() {
   renderDirectList();
   document.getElementById('previewCard').style.display = 'none';
   refreshDashboard();
+  try { localStorage.removeItem(STORAGE_KEY); } catch(e) {}
   showToast('초기화되었습니다', 'success');
 }
 
@@ -565,19 +604,35 @@ function submitCheckin() {
   }
 
   errEl.style.display = 'none';
-  const time = new Date().toLocaleTimeString('ko-KR', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
+  const now = new Date();
+  const time = now.toLocaleDateString('ko-KR', {month:'2-digit', day:'2-digit'}).replace('. ', '/').replace('.', '') + ' ' + now.toLocaleTimeString('ko-KR', {hour:'2-digit', minute:'2-digit', second:'2-digit'});
   const pre = preRegistered.find(p => p.name === name);
   const walkIn = !pre;
   const finalOrg = org || pre?.org || '';
 
   checkins.push({ id: 'ci_' + Date.now(), name, org: finalOrg, time, walkIn });
-  refreshDashboard();
+  refreshDashboard(); saveState();
 
   document.getElementById('modalFormView').style.display = 'none';
   document.getElementById('modalSuccessView').style.display = '';
   document.getElementById('successName').textContent = name;
   document.getElementById('successOrg').textContent = finalOrg || '소속 없음';
   document.getElementById('successTime').textContent = `참석 시각: ${time}  ·  ${walkIn ? '현장 등록' : '사전 등록'}`;
+
+  // 3초 카운트다운 후 탭 자동 닫기
+  let count = 3;
+  const countEl = document.getElementById('successCountdown');
+  countEl.textContent = `${count}초 후 자동으로 닫힙니다...`;
+  const timer = setInterval(() => {
+    count--;
+    if (count > 0) {
+      countEl.textContent = `${count}초 후 자동으로 닫힙니다...`;
+    } else {
+      clearInterval(timer);
+      window.close();
+      if (!window.closed) window.history.back();
+    }
+  }, 1000);
 }
 
 // ── Dashboard ──
@@ -600,27 +655,35 @@ function buildRows(query) {
   const rows = [];
   preRegistered.forEach(p => {
     const c = checkins.find(ci => ci.name === p.name);
-    rows.push({ name: p.name, org: p.org, checkedIn: !!c, time: c?.time || '', walkIn: false });
+    rows.push({ name: p.name, org: p.org, checkedIn: !!c, time: c?.time || '', walkIn: false, checkinId: c?.id || null });
   });
   checkins.filter(c => c.walkIn).forEach(c => {
-    rows.push({ name: c.name, org: c.org, checkedIn: true, time: c.time, walkIn: true });
+    rows.push({ name: c.name, org: c.org, checkedIn: true, time: c.time, walkIn: true, checkinId: c.id });
   });
   if (query) return rows.filter(r => r.name.includes(query) || r.org.includes(query));
   return rows;
+}
+
+function deleteCheckin(checkinId, name) {
+  if (!confirm(`'${name}'님의 체크인 기록을 삭제하시겠습니까?`)) return;
+  checkins = checkins.filter(c => c.id !== checkinId);
+  refreshDashboard(); saveState();
+  showToast(`🗑️ ${name}님 체크인 기록이 삭제되었습니다`, 'success');
 }
 
 function renderTable(rows) {
   const wrap = document.getElementById('dashTable');
   if (!rows.length) { wrap.innerHTML = '<div class="empty-state"><div class="empty-icon">📊</div><p>아직 체크인 데이터가 없습니다</p></div>'; return; }
   wrap.innerHTML = `<table>
-    <thead><tr><th>이름</th><th>소속</th><th>구분</th><th>상태</th><th>체크인 시각</th></tr></thead>
+    <thead><tr><th>이름</th><th>소속</th><th>구분</th><th>상태</th><th>체크인 일시</th><th>삭제</th></tr></thead>
     <tbody>${rows.map(r => `
       <tr>
         <td style="font-weight:700">${r.name}</td>
         <td>${r.org || '-'}</td>
         <td>${r.walkIn ? '<span class="badge badge-walkin">현장</span>' : '<span style="font-size:0.76rem;color:var(--muted)">사전</span>'}</td>
         <td><span class="badge ${r.checkedIn ? 'badge-done' : 'badge-wait'}">${r.checkedIn ? '✅ 완료' : '⏳ 대기'}</span></td>
-        <td style="font-family:\'IBM Plex Mono\',monospace;font-size:0.8rem;color:${r.checkedIn ? 'var(--accent)' : 'var(--muted)'}">${r.time || '-'}</td>
+        <td style="font-family:\'IBM Plex Mono\',monospace;font-size:0.78rem;color:${r.checkedIn ? 'var(--accent)' : 'var(--muted)'}">${r.time || '-'}</td>
+        <td>${r.checkinId ? `<button onclick="deleteCheckin('${r.checkinId}','${r.name}')" style="background:none;border:1px solid #3a2a2a;border-radius:6px;color:var(--warn);cursor:pointer;padding:3px 9px;font-size:0.76rem;transition:all 0.15s;" onmouseover="this.style.background='rgba(255,107,107,0.12)'" onmouseout="this.style.background='none'">삭제</button>` : '-'}</td>
       </tr>`).join('')}
     </tbody>
   </table>`;
@@ -631,7 +694,7 @@ function filterTable(q) { renderTable(buildRows(q || '')); }
 function downloadCSV() {
   const rows = buildRows();
   if (!rows.length) { showToast('다운로드할 데이터가 없습니다', 'error'); return; }
-  const data = [['이름','소속','구분','체크인여부','체크인시각'],
+  const data = [['이름','소속','구분','체크인여부','체크인일시'],
     ...rows.map(r => [r.name, r.org, r.walkIn ? '현장등록' : '사전등록', r.checkedIn ? '완료' : '미완료', r.time || ''])];
   const csv = '\uFEFF' + data.map(r => r.join(',')).join('\n');
   const a = document.createElement('a');
@@ -661,6 +724,7 @@ uz.addEventListener('drop', e => {
 
 // ── URL 파라미터로 자동 체크인 모달 오픈 ──
 window.addEventListener('DOMContentLoaded', () => {
+  loadState();
   const params = new URLSearchParams(location.search);
   if (params.get('checkin') === '1') {
     const eventName = params.get('event') || '';
