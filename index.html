@@ -677,6 +677,31 @@
 
   ::-webkit-scrollbar{width:5px;height:5px;} ::-webkit-scrollbar-track{background:var(--surface);} ::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px;}
   @keyframes slideIn{from{opacity:0;transform:translateX(-8px);}to{opacity:1;transform:translateX(0);}}
+
+  /* ── 반응형 (모바일) ── */
+  @media (max-width: 768px) {
+    .wrap { padding: 12px 14px; }
+    .header { padding: 12px 16px; flex-wrap: wrap; gap: 8px; }
+    .logo { font-size: 1.1rem; }
+    #eventNameDisplay { font-size: .78rem; }
+    .tabs { gap: 5px; }
+    .tab { padding: 7px 10px; font-size: .76rem; }
+    .card { padding: 16px; }
+    .stats-row { grid-template-columns: repeat(2, 1fr); }
+    .search-row { flex-wrap: wrap; }
+    .search-row input { width: 100%; flex: none; }
+    .qr-display-wrap { flex-direction: column; align-items: center; gap: 20px; }
+    .qr-display-wrap > div:last-child { width: 100%; min-width: unset; }
+    th { font-size: .68rem; padding: 8px 8px; }
+    td { font-size: .8rem; padding: 8px 8px; }
+    .btn { padding: 9px 12px; font-size: .8rem; }
+    .flex-row { gap: 8px; }
+    .live-badge { display: none; }
+    .ci-box { padding: 28px 20px; margin: 16px; width: calc(100% - 32px); }
+    .ci-title { font-size: 1.3rem; }
+    #doneView > div { padding: 36px 24px; margin: 16px; width: calc(100% - 32px); }
+    .upload-zone { padding: 24px; }
+  }
 </style>
 </head>
 <body>
