@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>QR 참석 확인 시스템</title>
+<title>NICE QR체크인</title>
 <script type="module">
   import { initializeApp } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js';
   import { getDatabase, ref, onValue, push, remove, set, get } from 'https://www.gstatic.com/firebasejs/10.12.0/firebase-database.js';
@@ -188,16 +188,16 @@
 
   window.generateQR = function() {
     const v = document.getElementById('qrEventInput').value.trim();
-    if (!v) { showToast('이벤트 이름을 입력해주세요', 'error'); return; }
+    if (!v) { showToast('행사 이름을 입력해주세요', 'error'); return; }
     window.syncEventName(v);
     renderQR();
   };
 
   // ── 탭 전환 ──
   window.switchTab = function(name) {
-    ['setup','qr','dashboard'].forEach((n,i) => {
-      document.querySelectorAll('.tab')[i].classList.toggle('active', n === name);
-      document.getElementById('panel-' + n).classList.toggle('active', n === name);
+    ['setup','qr','dashboard','admin'].forEach((n,i) => {
+      document.querySelectorAll('.tab')[i]?.classList.toggle('active', n === name);
+      document.getElementById('panel-' + n)?.classList.toggle('active', n === name);
     });
     if (name === 'qr') {
       const ev = document.getElementById('eventNameInput').value.trim();
@@ -423,6 +423,7 @@
   }
 
   window.deleteCheckin = async function(key, name) {
+    if (sessionStorage.getItem('admin_authed') !== '1') { showToast('관리자만 삭제할 수 있습니다', 'error'); return; }
     if (!confirm(`'${name}'님의 체크인 기록을 삭제하시겠습니까?`)) return;
     const ev = document.getElementById('eventNameInput').value.trim();
     if (db && ev) {
@@ -441,7 +442,7 @@
       return;
     }
     wrap.innerHTML = `<table>
-      <thead><tr><th>이름</th><th>소속</th><th>구분</th><th>상태</th><th>체크인 일시</th><th>삭제</th></tr></thead>
+      <thead><tr><th>이름</th><th>소속</th><th>구분</th><th>상태</th><th>체크인 일시</th><th>${sessionStorage.getItem('admin_authed')==='1' ? '삭제' : '🔐'}</th></tr></thead>
       <tbody>${rows.map(r => `
         <tr>
           <td style="font-weight:700">${r.name}</td>
@@ -449,7 +450,7 @@
           <td>${r.walkIn ? '<span class="badge badge-walkin">현장</span>' : '<span style="font-size:0.76rem;color:var(--muted)">사전</span>'}</td>
           <td><span class="badge ${r.checkedIn?'badge-done':'badge-wait'}">${r.checkedIn?'✅ 완료':'⏳ 대기'}</span></td>
           <td style="font-family:'IBM Plex Mono',monospace;font-size:0.78rem;color:${r.checkedIn?'var(--accent)':'var(--muted)'}">${r.time||'-'}</td>
-          <td>${r.checkinKey ? `<button onclick="deleteCheckin('${r.checkinKey}','${r.name}')" class="del-btn">삭제</button>` : '-'}</td>
+          <td>${r.checkinKey && sessionStorage.getItem('admin_authed')==='1' ? `<button onclick="deleteCheckin('${r.checkinKey}','${r.name}')" class="del-btn">삭제</button>` : (r.checkinKey ? '<span style="font-size:.76rem;color:var(--muted)">🔐</span>' : '-')}</td>
         </tr>`).join('')}
       </tbody>
     </table>`;
@@ -526,6 +527,117 @@
     document.getElementById('done_org').textContent = record.org;
     document.getElementById('done_time').textContent = `참석 시각: ${record.time} · ${record.walkIn ? '현장 등록' : '사전 등록'}`;
   }
+
+  // ════════════════════════════════
+  //  관리자 기능
+  // ════════════════════════════════
+  const ADMIN_PW_KEY = 'admin_pw';
+  const ADMIN_AUTH_KEY = 'admin_authed';
+  const DEFAULT_PW = 'nice1234'; // 기본 비밀번호
+
+  function getAdminPw() {
+    return localStorage.getItem(ADMIN_PW_KEY) || DEFAULT_PW;
+  }
+
+  window.checkAdminPw = function() {
+    const input = document.getElementById('adminPwInput').value;
+    const errEl = document.getElementById('adminPwError');
+    if (input === getAdminPw()) {
+      sessionStorage.setItem(ADMIN_AUTH_KEY, '1');
+      document.getElementById('adminLock').style.display = 'none';
+      document.getElementById('adminContent').style.display = 'block';
+      document.getElementById('adminPwInput').value = '';
+      errEl.style.display = 'none';
+      refreshDashboard(); // 삭제 버튼 표시 업데이트
+    } else {
+      errEl.style.display = '';
+      document.getElementById('adminPwInput').value = '';
+      document.getElementById('adminPwInput').focus();
+    }
+  };
+
+  window.adminLogout = function() {
+    sessionStorage.removeItem(ADMIN_AUTH_KEY);
+    document.getElementById('adminLock').style.display = '';
+    document.getElementById('adminContent').style.display = 'none';
+    document.getElementById('adminPwInput').value = '';
+    refreshDashboard(); // 삭제 버튼 숨김 업데이트
+    window.switchTab('setup');
+    showToast('로그아웃되었습니다', 'success');
+  };
+
+  // 탭 전환 시 인증 상태 확인
+  const _origSwitchTab = window.switchTab;
+  window.switchTab = function(name) {
+    if (name === 'admin') {
+      _origSwitchTab(name);
+      if (sessionStorage.getItem(ADMIN_AUTH_KEY) === '1') {
+        document.getElementById('adminLock').style.display = 'none';
+        document.getElementById('adminContent').style.display = 'block';
+      } else {
+        document.getElementById('adminLock').style.display = '';
+        document.getElementById('adminContent').style.display = 'none';
+        setTimeout(() => document.getElementById('adminPwInput').focus(), 100);
+      }
+      return;
+    }
+    _origSwitchTab(name);
+  };
+
+  window.changeAdminPw = function() {
+    const pw1 = document.getElementById('newPw1').value;
+    const pw2 = document.getElementById('newPw2').value;
+    const msgEl = document.getElementById('pwChangeMsg');
+    if (!pw1) { msgEl.textContent = '새 비밀번호를 입력해주세요.'; msgEl.style.color='var(--warn)'; msgEl.style.display=''; return; }
+    if (pw1 !== pw2) { msgEl.textContent = '비밀번호가 일치하지 않습니다.'; msgEl.style.color='var(--warn)'; msgEl.style.display=''; return; }
+    localStorage.setItem(ADMIN_PW_KEY, pw1);
+    msgEl.textContent = '✅ 비밀번호가 변경되었습니다.';
+    msgEl.style.color = 'var(--accent)';
+    msgEl.style.display = '';
+    document.getElementById('newPw1').value = '';
+    document.getElementById('newPw2').value = '';
+  };
+
+  window.loadEventList = async function() {
+    const listEl = document.getElementById('eventList');
+    listEl.innerHTML = '<div style="text-align:center;padding:20px;color:var(--muted);">불러오는 중...</div>';
+    if (!db) { listEl.innerHTML = '<div class="empty-state"><p>Firebase 연결이 필요합니다</p></div>'; return; }
+    try {
+      const snap = await get(ref(db, 'events'));
+      const data = snap.val();
+      if (!data) { listEl.innerHTML = '<div class="empty-state"><div class="empty-icon">📂</div><p>저장된 이벤트가 없습니다</p></div>'; return; }
+      const events = Object.keys(data);
+      listEl.innerHTML = events.map(key => {
+        const checkinCount = data[key].checkins ? Object.keys(data[key].checkins).length : 0;
+        const preCount = data[key].preRegistered ? Object.keys(data[key].preRegistered).length : 0;
+        const displayName = decodeURIComponent(key.replace(/_/g, ' '));
+        return `<div style="display:flex;align-items:center;gap:12px;padding:12px 14px;background:var(--surface2);border:1px solid var(--border);border-radius:10px;margin-bottom:8px;">
+          <div style="flex:1;">
+            <div style="font-weight:700;font-size:.9rem;">${displayName}</div>
+            <div style="font-size:.76rem;color:var(--muted);margin-top:3px;">사전 등록 ${preCount}명 · 체크인 ${checkinCount}명</div>
+          </div>
+          <button class="del-btn" onclick="deleteEvent('${key}','${displayName}')">🗑️ 삭제</button>
+        </div>`;
+      }).join('');
+    } catch(e) {
+      listEl.innerHTML = `<div class="empty-state"><p>오류: ${e.message}</p></div>`;
+    }
+  };
+
+  window.deleteEvent = async function(key, name) {
+    if (!confirm(`'${name}' 이벤트의 모든 데이터를 삭제하시겠습니까?\n이 작업은 되돌릴 수 없습니다.`)) return;
+    await remove(ref(db, `events/${key}`));
+    showToast(`🗑️ '${name}' 이벤트가 삭제되었습니다`, 'success');
+    window.loadEventList();
+  };
+
+  window.deleteAllEvents = async function() {
+    if (!confirm('모든 이벤트 데이터를 삭제하시겠습니까?\n이 작업은 절대 되돌릴 수 없습니다.')) return;
+    if (!confirm('정말로 삭제하시겠습니까? 마지막 확인입니다.')) return;
+    await remove(ref(db, 'events'));
+    showToast('전체 이벤트 데이터가 삭제되었습니다', 'success');
+    window.loadEventList();
+  };
 
   // ── Toast ──
   window.showToast = function(msg, type) {
@@ -766,7 +878,7 @@
 <div id="adminView">
   <div class="wrap">
     <div class="header">
-      <div class="logo">QR <span>CHECK</span>IN</div>
+      <div class="logo"><img src="data:image/webp;base64,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" style="height:28px;vertical-align:middle;margin-right:8px;border-radius:3px;"> NICE <span>QR체크인</span></div>
       <div style="display:flex;align-items:center;gap:16px;">
         <div class="live-badge"><div class="live-dot"></div>실시간 동기화</div>
         <div class="event-label">
@@ -780,13 +892,14 @@
       <button class="tab active" onclick="switchTab('setup')">⚙️ 설정</button>
       <button class="tab" onclick="switchTab('qr')">🔳 QR 코드</button>
       <button class="tab" onclick="switchTab('dashboard')">📊 현황 대시보드</button>
+      <button class="tab" onclick="switchTab('admin')" style="margin-left:auto;border-color:#f59e0b;color:#f59e0b;">🔐 관리자</button>
     </div>
 
     <!-- 설정 -->
     <div id="panel-setup" class="panel active">
       <div class="card">
-        <div class="card-title">이벤트 정보</div>
-        <label>이벤트 이름</label>
+        <div class="card-title">행사 정보</div>
+        <label>행사 이름</label>
         <input type="text" id="eventNameInput" placeholder="예: 2026년 NICE평가정보 캐피탈업권 세미나" oninput="updateEventName()">
       </div>
 
@@ -844,12 +957,12 @@
       <div class="card">
         <div class="card-title">이벤트 체크인 QR 코드</div>
         <div style="display:flex;gap:10px;align-items:center;margin-bottom:18px;">
-          <input type="text" id="qrEventInput" placeholder="이벤트 이름 입력 후 QR 생성..." style="flex:1"
+          <input type="text" id="qrEventInput" placeholder="행사 이름 입력 후 QR 생성..." style="flex:1"
             onkeydown="if(event.key==='Enter')generateQR()" oninput="syncEventName(this.value)">
           <button class="btn btn-p" onclick="generateQR()">🔳 QR 생성</button>
         </div>
         <div id="qrNotReady">
-          <div class="empty-state"><div class="empty-icon">🔳</div><p>이벤트 이름을 입력하고 QR 생성 버튼을 눌러주세요</p></div>
+          <div class="empty-state"><div class="empty-icon">🔳</div><p>행사 이름을 입력하고 QR 생성 버튼을 눌러주세요</p></div>
         </div>
         <div id="qrReady" class="qr-display-wrap" style="display:none">
           <div class="qr-box">
@@ -901,9 +1014,65 @@
         </div>
       </div>
     </div>
+
+    <!-- 관리자 -->
+    <div id="panel-admin" class="panel">
+
+      <!-- 비밀번호 잠금 화면 -->
+      <div id="adminLock" class="card" style="max-width:400px;margin:40px auto;">
+        <div class="card-title" style="color:#f59e0b;">🔐 관리자 인증</div>
+        <div style="font-size:.85rem;color:var(--muted);margin-bottom:16px;">관리자 비밀번호를 입력해주세요.</div>
+        <input type="password" id="adminPwInput" placeholder="비밀번호 입력"
+          onkeydown="if(event.key==='Enter')checkAdminPw()"
+          style="margin-bottom:10px;">
+        <div id="adminPwError" style="font-size:.82rem;color:var(--warn);margin-bottom:10px;display:none;">비밀번호가 올바르지 않습니다.</div>
+        <button class="btn btn-p" style="width:100%;background:#f59e0b;color:#000;" onclick="checkAdminPw()">확인</button>
+      </div>
+
+      <!-- 관리자 컨텐츠 (인증 후 표시) -->
+      <div id="adminContent" style="display:none;">
+
+        <div class="card">
+          <div class="card-title" style="color:#f59e0b;">🗂️ 이벤트 관리</div>
+          <div style="font-size:.82rem;color:var(--muted);margin-bottom:14px;">Firebase에 저장된 이벤트 목록을 불러와 삭제할 수 있습니다.</div>
+          <div class="flex-row" style="margin-bottom:16px;">
+            <button class="btn btn-p" style="background:#f59e0b;color:#000;" onclick="loadEventList()">🔄 이벤트 목록 불러오기</button>
+          </div>
+          <div id="eventList">
+            <div class="empty-state"><div class="empty-icon">📂</div><p>목록 불러오기 버튼을 눌러주세요</p></div>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-title" style="color:#f59e0b;">🔑 비밀번호 변경</div>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+            <input type="password" id="newPw1" placeholder="새 비밀번호" style="flex:1;">
+            <input type="password" id="newPw2" placeholder="새 비밀번호 확인" style="flex:1;">
+            <button class="btn btn-p" style="background:#f59e0b;color:#000;" onclick="changeAdminPw()">변경</button>
+          </div>
+          <div id="pwChangeMsg" style="font-size:.82rem;margin-top:8px;display:none;"></div>
+        </div>
+
+        <div class="card" style="border-color:rgba(255,107,107,.3);">
+          <div class="card-title" style="color:var(--warn);">⚠️ 위험 구역</div>
+          <div style="font-size:.82rem;color:var(--muted);margin-bottom:14px;">아래 작업은 되돌릴 수 없습니다.</div>
+          <button class="btn" style="background:rgba(255,107,107,.12);border:1px solid var(--warn);color:var(--warn);" onclick="deleteAllEvents()">🗑️ 전체 이벤트 데이터 삭제</button>
+        </div>
+
+        <div style="text-align:right;margin-top:8px;">
+          <button class="btn btn-s" onclick="adminLogout()">🔓 로그아웃</button>
+        </div>
+      </div>
+    </div>
   </div>
 </div>
 
 <div id="toast"></div>
+<div style="position:relative;z-index:1;text-align:center;padding:24px 24px 6px;font-size:0.85rem;color:var(--muted);font-style:italic;">
+  "바람이 불지 않으면, 노를 저어 나아간다."
+</div>
+<div style="position:relative;z-index:1;text-align:center;padding:6px 24px 18px;font-size:0.75rem;color:var(--muted);border-top:1px solid #2a2a3d;margin-top:4px;">
+  © NICE평가정보 정보사업3실
+</div>
 </body>
 </html>
