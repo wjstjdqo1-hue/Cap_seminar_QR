@@ -307,14 +307,27 @@
     if (!preRegistered.length) { card.style.display = 'none'; return; }
     card.style.display = 'block';
     document.getElementById('previewCount').textContent = `(총 ${preRegistered.length}명)`;
+
+    // 소속별 인원 집계
+    const orgMap = {};
+    preRegistered.forEach(p => {
+      const org = p.org || '소속 없음';
+      orgMap[org] = (orgMap[org] || 0) + 1;
+    });
+    const sorted = Object.entries(orgMap).sort((a, b) => b[1] - a[1]);
+    const maxCount = sorted[0]?.[1] || 1;
+
     document.getElementById('previewTable').innerHTML = `
-      <table>
-        <thead><tr><th>이름</th><th>소속</th></tr></thead>
-        <tbody>${preRegistered.slice(0,8).map(p =>
-          `<tr><td style="font-weight:700">${p.name}</td><td>${p.org||'-'}</td></tr>`).join('')}
-        </tbody>
-      </table>
-      ${preRegistered.length > 8 ? `<div style="text-align:center;padding:10px;color:var(--muted);font-size:0.8rem">...외 ${preRegistered.length-8}명</div>` : ''}`;
+      <div style="display:flex;flex-direction:column;gap:8px;">
+        ${sorted.map(([org, count]) => `
+          <div style="display:flex;align-items:center;gap:12px;">
+            <div style="min-width:120px;font-size:.86rem;font-weight:600;color:var(--text);flex-shrink:0;">${org}</div>
+            <div style="flex:1;background:var(--surface2);border-radius:99px;height:10px;overflow:hidden;">
+              <div style="height:100%;width:${Math.round(count/maxCount*100)}%;background:linear-gradient(90deg,var(--accent2),var(--accent));border-radius:99px;transition:width .4s;"></div>
+            </div>
+            <div style="min-width:40px;text-align:right;font-family:'IBM Plex Mono',monospace;font-size:.82rem;color:var(--accent);font-weight:700;">${count}명</div>
+          </div>`).join('')}
+      </div>`;
   }
 
   // ── QR 생성 ──
@@ -947,7 +960,7 @@
       </div>
 
       <div class="card" id="previewCard" style="display:none">
-        <div class="card-title">등록된 명단 <span id="previewCount" style="color:var(--muted);font-weight:400;font-size:.82rem"></span></div>
+        <div class="card-title">사전등록 요약 <span id="previewCount" style="color:var(--muted);font-weight:400;font-size:.82rem"></span></div>
         <div id="previewTable"></div>
       </div>
     </div>
