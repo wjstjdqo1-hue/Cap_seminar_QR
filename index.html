@@ -59,6 +59,9 @@
     const r = ref(db, `events/${encodeKey(eventName)}/preRegistered`);
     onValue(r, snap => {
       preRegistered = snap.val() ? Object.values(snap.val()) : [];
+      // directEntries도 Firebase 데이터와 동기화
+      directEntries = preRegistered.map(p => ({ name: p.name, org: p.org || '' }));
+      renderDirectList();
       showPreview();
       refreshDashboard();
     });
